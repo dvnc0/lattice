@@ -367,8 +367,8 @@ The schema is stable now; behaviors activate per task (see `TASKS.md`):
 | Capability | Status |
 |------------|--------|
 | Parse + validate config (YAML/JSON), defaults-merge, exactly-one-of http/cli | ✅ T3 |
-| `${ENV}` interpolation | T4 |
-| `check` (env presence, JSON-Schema validity, include/exclude exclusivity, `body`+`body_from` conflict, per-variant auth keys) | T5 |
+| `${ENV}` interpolation | ✅ T4 |
+| `check` (env presence, JSON-Schema validity, include/exclude exclusivity, `body`+`body_from` conflict, per-variant auth keys) | ✅ T5 |
 | Value expressions (`$ref` / `${ENV}` / `{{ template }}` / `{path}`) | T6 |
 | Nested body building | T7 |
 | HTTP request build + execution | T8, T11 |

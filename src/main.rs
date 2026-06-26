@@ -64,18 +64,33 @@ fn init_tracing() {
         .init();
 }
 
-/// Validate a config. (Real validation lands in tasks T3–T5.)
+/// Validate a config and print a report. Exits non-zero if the config has errors.
 fn check(config: Option<&Path>) -> anyhow::Result<()> {
     // A missing config is a usage error: fail with a non-zero exit so CI can't read
     // it as a passing check.
     let Some(path) = config else {
         anyhow::bail!("check: --config <path> is required");
     };
-    eprintln!(
-        "check {}: not yet implemented (tasks T3-T5)",
-        path.display()
+
+    let report = lattice::config::check(path)?;
+    println!(
+        "{}: {} tool(s), expose = {:?}",
+        path.display(),
+        report.tool_count,
+        report.expose
     );
-    Ok(())
+    for warning in &report.warnings {
+        println!("  warning: {warning}");
+    }
+    for error in &report.errors {
+        println!("  error: {error}");
+    }
+    if report.is_valid() {
+        println!("OK");
+        Ok(())
+    } else {
+        anyhow::bail!("{} error(s) found", report.errors.len());
+    }
 }
 
 /// Serve the MCP server over stdio.

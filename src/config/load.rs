@@ -1,15 +1,17 @@
-//! Loading, defaults-merging, and structural validation of a [`Config`].
+//! Loading, defaults-merging, and validation of a [`Config`].
 //!
-//! `${ENV}` interpolation (task T4) and richer validation — JSON Schema checks,
-//! value-reference sanity, include/exclude exclusivity (task T5) — layer on top of
-//! this. Here we cover: read → parse (by extension) → merge defaults → enforce the
-//! one structural invariant (each tool has exactly one of `http`/`cli`).
+//! `load_config` does: read → parse (by extension) → `${ENV}` interpolation → merge
+//! defaults → enforce the structural invariant (each tool has exactly one of
+//! `http`/`cli`). The `check`/`check_str` functions add the preflight validations used
+//! by `lattice check`: JSON Schema validity, include/exclude exclusivity, `body` vs
+//! `body_from`, unknown `auth` keys, missing env, and malformed-`${...}` warnings.
 
 use std::path::Path;
 
+use serde_json::Value;
 use thiserror::Error;
 
-use super::Config;
+use super::{Config, ExposeMode, ResponseSpec};
 
 /// Errors raised while loading or validating a config.
 #[derive(Debug, Error)]
@@ -103,14 +105,188 @@ fn apply_defaults(config: &mut Config) {
     }
 }
 
-/// Enforce structural invariants that hold regardless of inputs.
-///
-/// Currently: each tool declares exactly one of `http`/`cli`. Task T5 extends this.
+/// Enforce the structural invariant used at serve time: each tool declares exactly one
+/// of `http`/`cli`. (The richer preflight checks live in [`check_str`].)
 fn validate(config: &Config) -> Result<(), ConfigError> {
     for tool in &config.tools {
         tool.target()?;
     }
     Ok(())
+}
+
+/// The result of validating a config without serving it (the `check` command).
+#[derive(Debug)]
+pub struct CheckReport {
+    /// Number of tools declared.
+    pub tool_count: usize,
+    /// The configured expose mode.
+    pub expose: ExposeMode,
+    /// Problems that make the config invalid.
+    pub errors: Vec<String>,
+    /// Non-fatal advisories.
+    pub warnings: Vec<String>,
+}
+
+impl CheckReport {
+    /// Whether the config is free of errors (warnings don't count).
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// Validate a config file without serving it: parse, structural checks, JSON Schema
+/// validity, `${ENV}` resolution, and advisories. Returns a [`CheckReport`]; only a
+/// read/format/parse failure (which prevents any analysis) is surfaced as `Err`.
+pub fn check(path: &Path) -> Result<CheckReport, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let format = format_from_path(path)?;
+    check_str(&text, format)
+}
+
+/// As [`check`], on already-loaded text.
+pub fn check_str(text: &str, format: Format) -> Result<CheckReport, ConfigError> {
+    let mut config = parse_config(text, format)?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    if config.tools.is_empty() {
+        warnings.push("config declares no tools".to_string());
+    }
+    validate_structure(&config, &mut errors);
+    validate_schemas(&config, &mut errors, &mut warnings);
+    check_auth_keys(text, format, &mut errors);
+
+    // Resolve ${ENV} against the process environment, collecting issues rather than
+    // bailing so the report covers everything at once.
+    let issues = super::interpolate::collect_issues(&mut config);
+    for var in &issues.missing {
+        errors.push(format!("missing environment variable: ${{{var}}}"));
+    }
+    for placeholder in &issues.malformed {
+        warnings.push(format!("malformed reference left as-is: {placeholder}"));
+    }
+
+    Ok(CheckReport {
+        tool_count: config.tools.len(),
+        expose: config.server.expose,
+        errors,
+        warnings,
+    })
+}
+
+/// Structural checks that don't depend on the environment.
+fn validate_structure(config: &Config, errors: &mut Vec<String>) {
+    for tool in &config.tools {
+        match tool.target() {
+            Ok(_) => {}
+            Err(ConfigError::Validation(msg)) => errors.push(msg),
+            Err(other) => errors.push(other.to_string()),
+        }
+        if let Some(http) = &tool.http {
+            check_response(&tool.name, &http.response, errors);
+            if !http.body.is_empty() && http.body_from.is_some() {
+                errors.push(format!(
+                    "tool '{}': set either `body` or `body_from`, not both",
+                    tool.name
+                ));
+            }
+        }
+        if let Some(cli) = &tool.cli {
+            check_response(&tool.name, &cli.response, errors);
+        }
+    }
+}
+
+fn check_response(tool: &str, response: &ResponseSpec, errors: &mut Vec<String>) {
+    if response.include.is_some() && response.exclude.is_some() {
+        errors.push(format!(
+            "tool '{tool}': response sets both `include` and `exclude`; choose one"
+        ));
+    }
+}
+
+/// Validate that each tool's `inputSchema` compiles as a JSON Schema, warning when absent.
+///
+/// This proves the schema is *compilable*, not meta-valid: unknown keyword names are
+/// valid JSON Schema and silently ignored, so a typo like `requird` is not caught here.
+fn validate_schemas(config: &Config, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
+    for tool in &config.tools {
+        if tool.input_schema.is_empty() {
+            warnings.push(format!(
+                "tool '{}': no inputSchema (the harness will see no argument schema)",
+                tool.name
+            ));
+            continue;
+        }
+        let schema = Value::Object(tool.input_schema.clone());
+        if let Err(err) = jsonschema::validator_for(&schema) {
+            errors.push(format!("tool '{}': invalid inputSchema: {err}", tool.name));
+        }
+    }
+}
+
+/// Catch unknown keys in `auth` blocks, which the internally-tagged `Auth` enum drops
+/// silently (serde forbids `deny_unknown_fields` on tagged enums). Operates on the raw
+/// document since the typed parse has already discarded the extras.
+fn check_auth_keys(text: &str, format: Format, errors: &mut Vec<String>) {
+    // Re-parse the raw document generically to inspect auth keys. A parse failure can't
+    // happen here (the typed parse in check_str already succeeded) but is skipped
+    // defensively rather than unwrapped.
+    let value: Value = match format {
+        Format::Yaml => match serde_norway::from_str(text) {
+            Ok(value) => value,
+            Err(_) => return,
+        },
+        Format::Json => match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(_) => return,
+        },
+    };
+
+    if let Some(auth) = value
+        .get("defaults")
+        .and_then(|defaults| defaults.get("auth"))
+    {
+        check_one_auth(auth, "defaults.auth", errors);
+    }
+    if let Some(tools) = value.get("tools").and_then(Value::as_array) {
+        for (index, tool) in tools.iter().enumerate() {
+            let label = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|name| format!("tool '{name}'"))
+                .unwrap_or_else(|| format!("tools[{index}]"));
+            if let Some(auth) = tool.get("http").and_then(|http| http.get("auth")) {
+                check_one_auth(auth, &format!("{label} http.auth"), errors);
+            }
+        }
+    }
+}
+
+fn check_one_auth(auth: &Value, location: &str, errors: &mut Vec<String>) {
+    let Some(object) = auth.as_object() else {
+        return;
+    };
+    let Some(kind) = object.get("type").and_then(Value::as_str) else {
+        return; // a missing/invalid `type` is already a typed-parse error
+    };
+    let allowed: &[&str] = match kind {
+        "bearer" => &["type", "token"],
+        "basic" => &["type", "username", "password"],
+        "api_key" => &["type", "in", "name", "value"],
+        "oauth2" => &["type", "token_url", "client_id", "client_secret", "scopes"],
+        _ => return, // an unknown type is already a typed-parse error
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            errors.push(format!(
+                "{location}: unknown field '{key}' for auth type '{kind}'"
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

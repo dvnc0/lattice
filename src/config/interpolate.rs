@@ -6,17 +6,16 @@
 //! `body_from` / args / stdin / env / cwd). Two things are deliberately left alone:
 //!
 //! - **`inputSchema`** — passed verbatim to the harness, so a `${...}` in a schema
-//!   description is not touched (and never reported missing).
+//!   description is not touched (and never reported missing/malformed).
 //! - **bare `$ref`** (no braces) — an input reference resolved by the engine (T6);
 //!   only the `${...}` form is an environment variable.
 //!
-//! Lookups are injected so tests don't mutate the process environment. Every missing
-//! variable across the whole config is collected, so one load reports them all at once.
+//! Lookups are injected so tests don't mutate the process environment. Issues are
+//! collected across the whole config: every unset **`missing`** variable and every
+//! **`malformed`** `${...}` (invalid name / unterminated) left verbatim.
 //!
 //! There is no escape for a literal `${...}` (e.g. `$${VAR}` is not special) — the
-//! `${name}` form is always treated as a variable reference. A malformed or
-//! invalid-name `${...}` is left verbatim and not reported (T5's `check` will warn on
-//! any residual `${...}`).
+//! `${name}` form is always treated as a variable reference.
 
 use std::collections::BTreeSet;
 
@@ -27,30 +26,56 @@ use super::{Auth, CliTarget, Config, Defaults, HttpTarget, Server, Tool};
 /// An environment lookup: variable name → value (if set).
 type Env<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
-/// Interpolate `${ENV}` across `config` using the process environment.
-///
-/// Returns the sorted list of variables that were referenced but unset.
-pub(super) fn interpolate(config: &mut Config) -> Result<(), Vec<String>> {
-    interpolate_with(config, &|name| std::env::var(name).ok())
+/// Issues found during interpolation.
+#[derive(Debug, Default)]
+pub(super) struct Issues {
+    /// Well-formed `${VAR}` references whose variable was unset (sorted, deduped).
+    pub missing: BTreeSet<String>,
+    /// Malformed `${...}` substrings left verbatim (invalid name / unterminated).
+    pub malformed: BTreeSet<String>,
 }
 
-/// Interpolate `${ENV}` across `config` using a caller-supplied lookup.
+/// A lookup backed by the process environment.
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Interpolate `${ENV}` across `config` using the process environment, returning an
+/// error listing all unset (well-formed) variables. Malformed placeholders do not fail
+/// the load — they surface in `check` (see [`collect_issues`]).
+pub(super) fn interpolate(config: &mut Config) -> Result<(), Vec<String>> {
+    interpolate_with(config, &process_env)
+}
+
+/// Interpolate using the process environment, returning all [`Issues`] without failing.
+pub(super) fn collect_issues(config: &mut Config) -> Issues {
+    interpolate_collect(config, &process_env)
+}
+
+/// As [`interpolate`] but with a caller-supplied lookup; fails on missing variables.
 pub(super) fn interpolate_with(config: &mut Config, env: &Env) -> Result<(), Vec<String>> {
-    let mut missing = BTreeSet::new();
-    walk_config(config, env, &mut missing);
-    if missing.is_empty() {
+    let issues = interpolate_collect(config, env);
+    if issues.missing.is_empty() {
         Ok(())
     } else {
-        Err(missing.into_iter().collect())
+        Err(issues.missing.into_iter().collect())
     }
+}
+
+/// Interpolate and return all [`Issues`] (missing + malformed) without failing.
+pub(super) fn interpolate_collect(config: &mut Config, env: &Env) -> Issues {
+    let mut issues = Issues::default();
+    walk_config(config, env, &mut issues);
+    issues
 }
 
 /// Replace `${NAME}` occurrences in a single string.
 ///
-/// A bare `$` (not followed by `{`) and any malformed/`${...}` with an invalid name
-/// are left exactly as-is. An unset (but well-formed) variable is recorded in `missing`
-/// and its placeholder is preserved so nothing is silently blanked.
-fn interpolate_str(input: &str, env: &Env, missing: &mut BTreeSet<String>) -> String {
+/// A bare `$` (not followed by `{`) is left intact. A well-formed but unset variable is
+/// recorded in `issues.missing` with its placeholder preserved (nothing is silently
+/// blanked). A malformed `${...}` (invalid name or unterminated) is left verbatim and
+/// recorded in `issues.malformed`.
+fn interpolate_str(input: &str, env: &Env, issues: &mut Issues) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -69,19 +94,20 @@ fn interpolate_str(input: &str, env: &Env, missing: &mut BTreeSet<String>) -> St
                 match env(&name) {
                     Some(value) => out.push_str(&value),
                     None => {
-                        missing.insert(name.clone());
+                        issues.missing.insert(name.clone());
                         out.push_str("${");
                         out.push_str(&name);
                         out.push('}');
                     }
                 }
             } else {
-                // Malformed or invalid name — re-emit verbatim.
-                out.push_str("${");
-                out.push_str(&name);
+                // Malformed or invalid name — re-emit verbatim and record it.
+                let mut snippet = format!("${{{name}");
                 if closed {
-                    out.push('}');
+                    snippet.push('}');
                 }
+                out.push_str(&snippet);
+                issues.malformed.insert(snippet);
             }
         } else {
             out.push(ch);
@@ -102,83 +128,83 @@ fn is_valid_env_name(name: &str) -> bool {
 
 // --- typed-tree walkers -----------------------------------------------------
 
-fn walk_config(config: &mut Config, env: &Env, missing: &mut BTreeSet<String>) {
-    walk_server(&mut config.server, env, missing);
-    walk_defaults(&mut config.defaults, env, missing);
+fn walk_config(config: &mut Config, env: &Env, issues: &mut Issues) {
+    walk_server(&mut config.server, env, issues);
+    walk_defaults(&mut config.defaults, env, issues);
     for tool in &mut config.tools {
-        walk_tool(tool, env, missing);
+        walk_tool(tool, env, issues);
     }
 }
 
-fn walk_server(server: &mut Server, env: &Env, missing: &mut BTreeSet<String>) {
-    istr(&mut server.name, env, missing);
-    iopt(&mut server.version, env, missing);
-    iopt(&mut server.instructions, env, missing);
+fn walk_server(server: &mut Server, env: &Env, issues: &mut Issues) {
+    istr(&mut server.name, env, issues);
+    iopt(&mut server.version, env, issues);
+    iopt(&mut server.instructions, env, issues);
 }
 
-fn walk_defaults(defaults: &mut Defaults, env: &Env, missing: &mut BTreeSet<String>) {
-    iopt(&mut defaults.base_url, env, missing);
-    imap(&mut defaults.headers, env, missing);
+fn walk_defaults(defaults: &mut Defaults, env: &Env, issues: &mut Issues) {
+    iopt(&mut defaults.base_url, env, issues);
+    imap(&mut defaults.headers, env, issues);
     if let Some(auth) = defaults.auth.as_mut() {
-        walk_auth(auth, env, missing);
+        walk_auth(auth, env, issues);
     }
 }
 
-fn walk_tool(tool: &mut Tool, env: &Env, missing: &mut BTreeSet<String>) {
-    istr(&mut tool.name, env, missing);
-    iopt(&mut tool.description, env, missing);
+fn walk_tool(tool: &mut Tool, env: &Env, issues: &mut Issues) {
+    istr(&mut tool.name, env, issues);
+    iopt(&mut tool.description, env, issues);
     // `input_schema` is intentionally not interpolated (verbatim to the harness).
     if let Some(http) = tool.http.as_mut() {
-        walk_http(http, env, missing);
+        walk_http(http, env, issues);
     }
     if let Some(cli) = tool.cli.as_mut() {
-        walk_cli(cli, env, missing);
+        walk_cli(cli, env, issues);
     }
 }
 
-fn walk_http(http: &mut HttpTarget, env: &Env, missing: &mut BTreeSet<String>) {
-    istr(&mut http.path, env, missing);
-    iopt(&mut http.base_url, env, missing);
-    imap(&mut http.query, env, missing);
-    imap(&mut http.headers, env, missing);
-    imap(&mut http.body, env, missing);
+fn walk_http(http: &mut HttpTarget, env: &Env, issues: &mut Issues) {
+    istr(&mut http.path, env, issues);
+    iopt(&mut http.base_url, env, issues);
+    imap(&mut http.query, env, issues);
+    imap(&mut http.headers, env, issues);
+    imap(&mut http.body, env, issues);
     if let Some(value) = http.body_from.as_mut() {
-        ivalue(value, env, missing);
+        ivalue(value, env, issues);
     }
     if let Some(auth) = http.auth.as_mut() {
-        walk_auth(auth, env, missing);
+        walk_auth(auth, env, issues);
     }
 }
 
-fn walk_cli(cli: &mut CliTarget, env: &Env, missing: &mut BTreeSet<String>) {
-    istr(&mut cli.command, env, missing);
+fn walk_cli(cli: &mut CliTarget, env: &Env, issues: &mut Issues) {
+    istr(&mut cli.command, env, issues);
     for arg in &mut cli.args {
-        ivalue(arg, env, missing);
+        ivalue(arg, env, issues);
     }
     if let Some(stdin) = cli.stdin.as_mut() {
-        ivalue(stdin, env, missing);
+        ivalue(stdin, env, issues);
     }
-    imap(&mut cli.env, env, missing);
+    imap(&mut cli.env, env, issues);
     if let Some(cwd) = cli.cwd.as_mut() {
-        ivalue(cwd, env, missing);
+        ivalue(cwd, env, issues);
     }
 }
 
 /// Exhaustive so a new [`Auth`] variant forces an interpolation decision here.
-fn walk_auth(auth: &mut Auth, env: &Env, missing: &mut BTreeSet<String>) {
+fn walk_auth(auth: &mut Auth, env: &Env, issues: &mut Issues) {
     match auth {
-        Auth::Bearer { token } => istr(token, env, missing),
+        Auth::Bearer { token } => istr(token, env, issues),
         Auth::Basic { username, password } => {
-            istr(username, env, missing);
-            istr(password, env, missing);
+            istr(username, env, issues);
+            istr(password, env, issues);
         }
         Auth::ApiKey {
             location: _,
             name,
             value,
         } => {
-            istr(name, env, missing);
-            istr(value, env, missing);
+            istr(name, env, issues);
+            istr(value, env, issues);
         }
         Auth::Oauth2 {
             token_url,
@@ -186,11 +212,11 @@ fn walk_auth(auth: &mut Auth, env: &Env, missing: &mut BTreeSet<String>) {
             client_secret,
             scopes,
         } => {
-            istr(token_url, env, missing);
-            istr(client_id, env, missing);
-            istr(client_secret, env, missing);
+            istr(token_url, env, issues);
+            istr(client_id, env, issues);
+            istr(client_secret, env, issues);
             for scope in scopes {
-                istr(scope, env, missing);
+                istr(scope, env, issues);
             }
         }
     }
@@ -198,34 +224,34 @@ fn walk_auth(auth: &mut Auth, env: &Env, missing: &mut BTreeSet<String>) {
 
 // --- leaf helpers -----------------------------------------------------------
 
-fn istr(s: &mut String, env: &Env, missing: &mut BTreeSet<String>) {
-    *s = interpolate_str(s, env, missing);
+fn istr(s: &mut String, env: &Env, issues: &mut Issues) {
+    *s = interpolate_str(s, env, issues);
 }
 
-fn iopt(s: &mut Option<String>, env: &Env, missing: &mut BTreeSet<String>) {
+fn iopt(s: &mut Option<String>, env: &Env, issues: &mut Issues) {
     if let Some(s) = s.as_mut() {
-        istr(s, env, missing);
+        istr(s, env, issues);
     }
 }
 
-fn imap(map: &mut super::ValueMap, env: &Env, missing: &mut BTreeSet<String>) {
+fn imap(map: &mut super::ValueMap, env: &Env, issues: &mut Issues) {
     for value in map.values_mut() {
-        ivalue(value, env, missing);
+        ivalue(value, env, issues);
     }
 }
 
 /// Recurse into a value expression, interpolating any string it contains.
-fn ivalue(value: &mut Value, env: &Env, missing: &mut BTreeSet<String>) {
+fn ivalue(value: &mut Value, env: &Env, issues: &mut Issues) {
     match value {
-        Value::String(s) => *s = interpolate_str(s, env, missing),
+        Value::String(s) => *s = interpolate_str(s, env, issues),
         Value::Array(items) => {
             for item in items {
-                ivalue(item, env, missing);
+                ivalue(item, env, issues);
             }
         }
         Value::Object(map) => {
             for v in map.values_mut() {
-                ivalue(v, env, missing);
+                ivalue(v, env, issues);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -247,51 +273,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn interpolate_str_replaces_and_preserves() {
-        let env = env_from(&[("A", "1"), ("B", "two")]);
-        let mut missing = BTreeSet::new();
-        assert_eq!(interpolate_str("${A}", &env, &mut missing), "1");
-        assert_eq!(
-            interpolate_str("x${A}-${B}y", &env, &mut missing),
-            "x1-twoy"
-        );
-        // A bare `$` (no braces) is left intact — it's an input ref for the engine.
-        assert_eq!(
-            interpolate_str("$A and ${A}", &env, &mut missing),
-            "$A and 1"
-        );
-        assert_eq!(
-            interpolate_str("price is $5", &env, &mut missing),
-            "price is $5"
-        );
-        assert_eq!(interpolate_str("plain", &env, &mut missing), "plain");
-        assert!(missing.is_empty());
+    fn run(input: &str, env: &[(&str, &str)]) -> (String, Issues) {
+        let mut issues = Issues::default();
+        let out = interpolate_str(input, &env_from(env), &mut issues);
+        (out, issues)
     }
 
     #[test]
-    fn interpolate_str_leaves_malformed_intact() {
-        let env = env_from(&[("A", "1")]);
-        let mut missing = BTreeSet::new();
-        assert_eq!(interpolate_str("${1BAD}", &env, &mut missing), "${1BAD}");
+    fn interpolate_str_replaces_and_preserves() {
+        let env = &[("A", "1"), ("B", "two")];
+        assert_eq!(run("${A}", env).0, "1");
+        assert_eq!(run("x${A}-${B}y", env).0, "x1-twoy");
+        // A bare `$` (no braces) is left intact — it's an input ref for the engine.
+        assert_eq!(run("$A and ${A}", env).0, "$A and 1");
+        assert_eq!(run("price is $5", env).0, "price is $5");
+        assert_eq!(run("plain", env).0, "plain");
+    }
+
+    #[test]
+    fn interpolate_str_records_malformed() {
+        let env = &[("A", "1")];
+        let (out, issues) = run("${1BAD} ${has space} ${unterminated", env);
+        assert_eq!(out, "${1BAD} ${has space} ${unterminated");
+        assert!(issues.missing.is_empty());
         assert_eq!(
-            interpolate_str("${has space}", &env, &mut missing),
-            "${has space}"
+            issues.malformed.into_iter().collect::<Vec<_>>(),
+            vec!["${1BAD}", "${has space}", "${unterminated"]
         );
-        assert_eq!(
-            interpolate_str("${unterminated", &env, &mut missing),
-            "${unterminated"
-        );
-        assert!(missing.is_empty());
     }
 
     #[test]
     fn interpolate_str_records_missing_and_keeps_placeholder() {
-        let env = env_from(&[("A", "1")]);
-        let mut missing = BTreeSet::new();
-        let out = interpolate_str("${X}-${A}-${Y}", &env, &mut missing);
+        let (out, issues) = run("${X}-${A}-${Y}", &[("A", "1")]);
         assert_eq!(out, "${X}-1-${Y}");
-        assert_eq!(missing.into_iter().collect::<Vec<_>>(), vec!["X", "Y"]);
+        assert_eq!(
+            issues.missing.into_iter().collect::<Vec<_>>(),
+            vec!["X", "Y"]
+        );
     }
 
     #[test]
@@ -317,8 +335,8 @@ tools:
         )
         .unwrap();
 
-        // Note: NOT_INTERPOLATED is absent from the env. interpolation succeeding proves
-        // the inputSchema was skipped (else it would be reported missing).
+        // NOT_INTERPOLATED is absent from the env; interpolation succeeding proves the
+        // inputSchema was skipped (else it would be reported missing).
         let env = env_from(&[("BASE", "https://h"), ("TOKEN", "secret"), ("SEG", "abc")]);
         interpolate_with(&mut config, &env).unwrap();
 

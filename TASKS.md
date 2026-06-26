@@ -1,7 +1,7 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. T1–T4 complete; rmcp API pinned,
-> config model + loader + `${ENV}` interpolation landed.
+> Status: **Phase 4 (Implement)** — in progress. **Phase A (T1–T5) complete**: rmcp API
+> pinned, config model + loader + `${ENV}` interpolation + `check` mode landed. Next: T6.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -37,10 +37,13 @@
     injected for race-free tests. `ConfigError::MissingEnv` lists all unset vars; wired
     into `load_config` before defaults-merge.
 
-- [ ] **T5 — `check` mode**
+- [x] **T5 — `check` mode** ✅
   - Acceptance: `lattice check --config X` parses, interpolates (reports missing env), enforces exactly-one-of http/cli, compiles each `inputSchema` as valid JSON Schema, warns on `$ref`s absent from the schema; prints summary (N tools, expose mode) and exits nonzero on any error.
   - Verify: `cargo test check_mode` (1 good + several bad fixtures).
   - Files: `src/config/load.rs`, `src/main.rs`, `tests/check_mode.rs`.
+  - Note: `check`/`check_str` return a `CheckReport {errors, warnings, tool_count, expose}`;
+    collects ALL issues (doesn't bail). Uses `jsonschema::validator_for` (default features
+    off → SSRF-safe). Auth unknown-key check walks the raw document. 10 check_mode tests.
   - Also (from T3 review): validate `include`/`exclude` mutual exclusivity, reject
     `body` + `body_from` both-set, and per-variant `auth` known-key checking
     (internally-tagged `Auth` can't use `deny_unknown_fields`, so `scope:` vs
@@ -116,6 +119,9 @@
   - Acceptance: call params validated against the tool's compiled `inputSchema` before any request/command; violations → `isError` listing them, nothing executed. Reuses schemas compiled in T5.
   - Verify: `cargo test schema_validation`.
   - Files: `src/engine/validate.rs`, `src/mcp/server.rs`.
+  - Also (from T5 review): `jsonschema` pulls `fancy-regex`; if a tool's `inputSchema`
+    uses `pattern` and we match it against model-supplied (attacker-influenced) input,
+    watch for ReDoS. Compile schemas once and reuse; consider bounding match effort.
 
 - [ ] **T18 — Streamable HTTP transport**
   - Acceptance: `--http 127.0.0.1:8080` serves the same tools over Streamable HTTP (loopback default); stdio still works when the flag is absent; an rmcp HTTP client lists+calls a tool.

@@ -9,7 +9,7 @@
 mod interpolate;
 mod load;
 
-pub use load::{load_config, parse_config, ConfigError, Format};
+pub use load::{check, check_str, load_config, parse_config, CheckReport, ConfigError, Format};
 
 use std::collections::BTreeMap;
 
