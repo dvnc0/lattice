@@ -25,6 +25,9 @@ serde_norway = "0.9"
 # JSON Schema validation (config `check` + runtime arg validation, T17). Default
 # features (remote/file $ref resolution via reqwest) disabled: SSRF-safe, lighter.
 jsonschema = { version = "0.46", default-features = false }
+# Templating for `{{ ... }}` value expressions. `fuel` bounds template execution
+# (a loop can be driven by model-supplied input).
+minijinja = { version = "2", features = ["fuel"] }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"

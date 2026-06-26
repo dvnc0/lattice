@@ -199,10 +199,16 @@ expression**, resolved against `{ input: <call args>, env: <process env> }`:
 | `{userId}` (in `path`)    | path-var sugar, equivalent to `$userId`            |
 | anything else             | **Literal** (YAML keeps native type)               |
 
-Internally this is one `enum ValueExpr { InputRef, Env, Literal, Template }` resolved
-by a single pipeline — so "anticipating templates" is satisfied structurally, and basic
+Internally this is one `enum ValueExpr { InputRef, Template, Literal }` resolved by a
+single pipeline — so "anticipating templates" is satisfied structurally, and basic
 `{{ }}` templating works in v1. Richer template features (filters, conditionals across
 fields) extend the `Template` variant without touching callers.
+
+> **Implemented refinement (T6):** there is no `Env` variant in the engine. `${ENV}` is
+> resolved at **load time** (T4) across every value leaf, so by the time the engine runs
+> no `${...}` remains and the resolution context is just `input`. A `${ENV}` inside a
+> `{{ ... }}` template is therefore substituted *before* the template renders. The engine
+> `ValueExpr` is `{ InputRef, Template, Literal }`.
 
 ### Nested body builder
 

@@ -1,7 +1,7 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. **Phase A (T1–T5) complete**: rmcp API
-> pinned, config model + loader + `${ENV}` interpolation + `check` mode landed. Next: T6.
+> Status: **Phase 4 (Implement)** — in progress. Phase A (T1–T5) + **T6 (value
+> expressions)** complete. Engine started. Next: T7 (nested body builder).
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -53,20 +53,30 @@
 
 ## Phase B — Engine (pure; parallel after T6)
 
-- [ ] **T6 — Value expressions**
+- [x] **T6 — Value expressions** ✅
   - Acceptance: `enum ValueExpr {InputRef,Env,Literal,Template}` parsed from config values; resolved against `{input,env}`; dotted input lookup; `{path}` sugar; minijinja render; missing input/env → typed error.
   - Verify: `cargo test value_expr`.
   - Files: `src/engine/mod.rs`, `src/engine/value.rs`.
+  - Note (design reconciliation): **no `Env` variant** — `${ENV}` is resolved at load
+    (T4), so the engine `ValueExpr` is `{InputRef, Template, Literal}` over `{input}`
+    only. `$ref` is a whole-value ref (preserves type); `{{ }}` templates render to
+    strings (lenient undefined); paths use `{name}` sugar via `resolve_path`. `resolve`
+    recurses into arrays/objects.
 
 - [ ] **T7 — Nested body builder**
   - Acceptance: dotted target-path keys build/merge nested JSON (`user.name.first`+`user.name.last`→`{user:{name:{first,last}}}`); `body_from:$ref` passthrough.
   - Verify: `cargo test body_builder`.
   - Files: `src/engine/body.rs`.
+  - Note (from T6 review): use `value::resolve_optional` so a body entry whose `$ref`
+    targets an absent optional input is **omitted** rather than erroring; present-but-null
+    refs are kept.
 
 - [ ] **T8 — HTTP request builder (pure)**
   - Acceptance: `Tool.http`+input → `HttpRequestSpec{method,url,query,headers,body,content_type}`; path vars filled; missing path var → error.
   - Verify: `cargo test http_request_builder`.
   - Files: `src/engine/request.rs`.
+  - Note (from T6 review): when resolving many template leaves per request, reuse a
+    single minijinja `Environment` (T6's `render` builds one per call).
 
 - [ ] **T9 — CLI command builder (pure)**
   - Acceptance: `Tool.cli`+input → `CommandSpec{program,argv,stdin,env,cwd}`; value-expr substitution; array input flattens to multiple args; no shell.

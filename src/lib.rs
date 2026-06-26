@@ -4,5 +4,6 @@
 //! servers using a single declarative config file. See `SPEC.md` for the design.
 
 pub mod config;
+pub mod engine;
 pub mod error;
 pub mod mcp;

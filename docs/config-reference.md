@@ -228,8 +228,8 @@ and the process `env`:
 | Form | Meaning | Example |
 |------|---------|---------|
 | `$name`, `$a.b.c` | **Input reference** — dotted lookup into the call's arguments | `"$firstName"`, `"$user.address.city"` |
-| `${VAR}` | **Environment variable** | `"${API_TOKEN}"` |
-| `{{ ... }}` | **Template** (minijinja) over `input` / `env` | `"{{ input.first }} {{ input.last }}"` |
+| `${VAR}` | **Environment variable** (resolved at load time, anywhere in the config) | `"${API_TOKEN}"` |
+| `{{ ... }}` | **Template** (minijinja) over `input` | `"{{ input.first }} {{ input.last }}"` |
 | `{name}` (in `path`) | Path-var sugar, equivalent to `$name` | `"/user/{userId}"` |
 | anything else | **Literal** (keeps its native JSON/YAML type) | `"lattice"`, `42`, `true` |
 
@@ -369,7 +369,7 @@ The schema is stable now; behaviors activate per task (see `TASKS.md`):
 | Parse + validate config (YAML/JSON), defaults-merge, exactly-one-of http/cli | ✅ T3 |
 | `${ENV}` interpolation | ✅ T4 |
 | `check` (env presence, JSON-Schema validity, include/exclude exclusivity, `body`+`body_from` conflict, per-variant auth keys) | ✅ T5 |
-| Value expressions (`$ref` / `${ENV}` / `{{ template }}` / `{path}`) | T6 |
+| Value expressions (`$ref` / `${ENV}` / `{{ template }}` / `{path}`) | ✅ T6 |
 | Nested body building | T7 |
 | HTTP request build + execution | T8, T11 |
 | CLI command build + execution | T9, T13 |
