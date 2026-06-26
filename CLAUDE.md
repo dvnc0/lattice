@@ -30,7 +30,11 @@ Only commit once 1–3 are done. Commit/push **only when the user asks**.
   write to stdout. All logs go to **stderr** (`init_tracing` in `src/main.rs` wires
   this up). There is a stdout-purity test guarding this.
 - **Secrets** come from `${ENV}` interpolation and are **never** written to a config
-  file or logged — redact in `Debug`/logs.
+  file or logged. `Auth`'s `Debug` is redacted — but interpolation can also place a
+  secret in a value-leaf (e.g. `${TOKEN}` inside a header/body), and those are **not**
+  redacted. So never `Debug`-log a whole `Config`/`Defaults`/`HttpTarget`/`CliTarget`;
+  log only specific non-secret fields, and steer config authors to put credentials in
+  the `auth` block. (Value-leaf redaction before request logging is tracked for T11/T12.)
 - **CLI execution is argv-only** — no shell interpolation (injection-safe).
 - **Tool failures** surface as `CallToolResult { is_error: true }` so the model can
   react, not as transport/protocol errors.

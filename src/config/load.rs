@@ -32,6 +32,9 @@ pub enum ConfigError {
     /// The config parsed but is structurally invalid.
     #[error("invalid config: {0}")]
     Validation(String),
+    /// One or more `${ENV}` references could not be resolved.
+    #[error("missing environment variable(s): {}", .0.join(", "))]
+    MissingEnv(Vec<String>),
 }
 
 /// The serialization format of a config file.
@@ -51,6 +54,7 @@ pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     })?;
     let format = format_from_path(path)?;
     let mut config = parse_config(&text, format)?;
+    super::interpolate::interpolate(&mut config).map_err(ConfigError::MissingEnv)?;
     apply_defaults(&mut config);
     validate(&config)?;
     Ok(config)

@@ -85,8 +85,10 @@ default fills in. Headers merge per-key, with the tool winning ties.
 ## Auth
 
 Selected by a `type` discriminator. Used under `defaults.auth` or a tool's `http.auth`.
-Secret-bearing values should always come from the environment via `${ENV}` — they are
-redacted from logs.
+Secret-bearing values should always come from the environment via `${ENV}`. **Prefer the
+`auth` block for credentials** — its secret fields are redacted from logs, whereas a
+secret placed directly in a header/query/body value is not. Never put a literal secret
+in the config file.
 
 ### `bearer`
 ```json

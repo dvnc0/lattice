@@ -6,6 +6,7 @@
 //! params, CLI args, …) are kept as raw [`serde_json::Value`] here — they are
 //! interpreted by the engine in later tasks (T6+), not parsed at config-load time.
 
+mod interpolate;
 mod load;
 
 pub use load::{load_config, parse_config, ConfigError, Format};

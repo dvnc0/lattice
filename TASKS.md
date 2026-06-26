@@ -1,7 +1,7 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. T1–T3 complete; rmcp API pinned,
-> config model + loader landed.
+> Status: **Phase 4 (Implement)** — in progress. T1–T4 complete; rmcp API pinned,
+> config model + loader + `${ENV}` interpolation landed.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -28,10 +28,14 @@
     by `type`; exactly-one-of http/cli enforced in `validate`; defaults-merge in
     `apply_defaults`. Schema/env/include-exclude validation deferred to T4/T5/T8.
 
-- [ ] **T4 — `${ENV}` interpolation**
+- [x] **T4 — `${ENV}` interpolation** ✅
   - Acceptance: `${VAR}` in any string leaf replaced from env; all missing vars collected into one descriptive error; non-`${}` `$` left intact.
   - Verify: `cargo test interpolate`.
   - Files: `src/config/interpolate.rs`, in-module tests.
+  - Note: typed-tree walk (no Serialize round-trip); interpolates value-bearing leaves
+    incl. auth, skips `inputSchema` (verbatim) and bare `$ref` (engine, T6). Env lookup
+    injected for race-free tests. `ConfigError::MissingEnv` lists all unset vars; wired
+    into `load_config` before defaults-merge.
 
 - [ ] **T5 — `check` mode**
   - Acceptance: `lattice check --config X` parses, interpolates (reports missing env), enforces exactly-one-of http/cli, compiles each `inputSchema` as valid JSON Schema, warns on `$ref`s absent from the schema; prints summary (N tools, expose mode) and exits nonzero on any error.
@@ -41,6 +45,8 @@
     `body` + `body_from` both-set, and per-variant `auth` known-key checking
     (internally-tagged `Auth` can't use `deny_unknown_fields`, so `scope:` vs
     `scopes:` is silently dropped today).
+  - Also (from T4 review): warn on any residual `${...}`-shaped substring left after
+    interpolation (catches malformed/invalid-name refs that pass through as literals).
 
 ## Phase B — Engine (pure; parallel after T6)
 
@@ -75,6 +81,9 @@
   - Acceptance: runs `HttpRequestSpec` via reqwest against `wiremock`, asserts correct method/url/headers/body, returns filtered body; non-2xx → `isError` with filtered body.
   - Verify: `cargo test --test http_integration`.
   - Files: `src/exec/mod.rs`, `src/exec/http.rs`, `tests/http_integration.rs`.
+  - Also (from T4 review): when logging requests, redact secret-bearing value-leaves
+    (headers/query/body can hold interpolated `${ENV}` secrets — only `Auth` is
+    redacted today). Never log a whole request/Config; log curated non-secret fields.
 
 - [ ] **T12 — Auth (bearer/basic/api_key + oauth2)**
   - Acceptance: each auth type adds correct header/query; oauth2 client-credentials fetches token from mock `token_url`, caches with expiry margin, single-flight refresh, refreshes on 401; secrets redacted in logs.
