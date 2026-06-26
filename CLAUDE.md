@@ -8,6 +8,7 @@ Planning docs are the source of truth — read them before non-trivial work:
 - `SPEC.md` — what we're building and why (design, config model, expose modes).
 - `PLAN.md` — components, build order, risks.
 - `TASKS.md` — the dependency-ordered task breakdown **and current status**.
+- `docs/config-reference.md` — every config option (the user-facing schema reference).
 
 ## Pre-commit workflow (required)
 
