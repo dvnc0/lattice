@@ -1,20 +1,23 @@
 # Tasks: Lattice
 
-> Status: **Phase 3 (Tasks)** — awaiting human review before Phase 4 (Implement).
+> Status: **Phase 4 (Implement)** — in progress. T1–T2 complete; rmcp API pinned.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
 
-- [ ] **T1 — Cargo scaffold**
+- [x] **T1 — Cargo scaffold** ✅
   - Acceptance: `cargo build` compiles; `lattice --help` shows `--config`, `--http`, and a `check` subcommand; `tracing` initialized to **stderr**; top-level error enum exists.
   - Verify: `cargo build`; `cargo run -- --help`.
   - Files: `Cargo.toml`, `src/main.rs`, `src/error.rs`, `src/lib.rs`, `.gitignore`.
 
-- [ ] **T2 — rmcp tracer bullet (de-risk)**
+- [x] **T2 — rmcp tracer bullet (de-risk)** ✅
   - Acceptance: minimal `rmcp` `ServerHandler` over stdio exposing ONE hardcoded `ping`→`pong` tool; an in-process rmcp client lists and calls it.
   - Verify: `cargo test mcp_tracer`.
   - Files: `src/mcp/mod.rs`, `src/mcp/server.rs`, `src/main.rs`, `tests/mcp_tracer.rs`.
-  - Note: pins the rmcp 1.8 API before the engine exists (risk #1).
+  - Note: pins the rmcp 1.8 API before the engine exists (risk #1). Also verified
+    stdout purity (logs→stderr) and server identifies as `lattice`. rmcp 1.8 API
+    locked: `ServerHandler` async-fn methods, `Tool::new`, `ListToolsResult::with_all_items`,
+    `CallToolResult::{success,error}`, `ServiceExt::serve(stdio())`.
 
 - [ ] **T3 — Config model + load**
   - Acceptance: serde types (Config/Server{name,version,instructions,expose}/Defaults{base_url,headers,auth}/Tool{name,description,inputSchema,http|cli,response}/Http/Cli/Auth/Response); same fixture parses identically from YAML (`serde_norway`) and JSON; defaults merge into tools.

@@ -1,4 +1,9 @@
 /target
-Cargo.lock
 **/*.rs.bk
+
+# Secrets / credentials — never commit. Config references env vars via ${ENV}.
 .env
+.env.local
+.env.*.local
+*.pem
+*.key
