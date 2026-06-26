@@ -1,6 +1,7 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. T1–T2 complete; rmcp API pinned.
+> Status: **Phase 4 (Implement)** — in progress. T1–T3 complete; rmcp API pinned,
+> config model + loader landed.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -19,10 +20,13 @@
     locked: `ServerHandler` async-fn methods, `Tool::new`, `ListToolsResult::with_all_items`,
     `CallToolResult::{success,error}`, `ServiceExt::serve(stdio())`.
 
-- [ ] **T3 — Config model + load**
+- [x] **T3 — Config model + load** ✅
   - Acceptance: serde types (Config/Server{name,version,instructions,expose}/Defaults{base_url,headers,auth}/Tool{name,description,inputSchema,http|cli,response}/Http/Cli/Auth/Response); same fixture parses identically from YAML (`serde_norway`) and JSON; defaults merge into tools.
   - Verify: `cargo test config_parse`.
   - Files: `src/config/mod.rs`, `src/config/load.rs`, `tests/config_parse.rs`, `tests/fixtures/example.{yaml,json}`.
+  - Note: `deny_unknown_fields` on structs (typo-catching); `Auth` internally tagged
+    by `type`; exactly-one-of http/cli enforced in `validate`; defaults-merge in
+    `apply_defaults`. Schema/env/include-exclude validation deferred to T4/T5/T8.
 
 - [ ] **T4 — `${ENV}` interpolation**
   - Acceptance: `${VAR}` in any string leaf replaced from env; all missing vars collected into one descriptive error; non-`${}` `$` left intact.
@@ -33,6 +37,10 @@
   - Acceptance: `lattice check --config X` parses, interpolates (reports missing env), enforces exactly-one-of http/cli, compiles each `inputSchema` as valid JSON Schema, warns on `$ref`s absent from the schema; prints summary (N tools, expose mode) and exits nonzero on any error.
   - Verify: `cargo test check_mode` (1 good + several bad fixtures).
   - Files: `src/config/load.rs`, `src/main.rs`, `tests/check_mode.rs`.
+  - Also (from T3 review): validate `include`/`exclude` mutual exclusivity, reject
+    `body` + `body_from` both-set, and per-variant `auth` known-key checking
+    (internally-tagged `Auth` can't use `deny_unknown_fields`, so `scope:` vs
+    `scopes:` is silently dropped today).
 
 ## Phase B — Engine (pure; parallel after T6)
 

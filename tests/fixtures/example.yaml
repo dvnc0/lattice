@@ -1,0 +1,58 @@
+server:
+  name: example-api
+  version: "0.1.0"
+  instructions: "Wraps the Example API."
+  expose: dispatcher
+
+defaults:
+  base_url: "https://api.example.com"
+  headers:
+    Accept: "application/json"
+  auth:
+    type: oauth2
+    token_url: "https://auth.example.com/token"
+    client_id: "${EXAMPLE_CLIENT_ID}"
+    client_secret: "${EXAMPLE_CLIENT_SECRET}"
+    scopes: ["read", "write"]
+
+tools:
+  - name: update_user
+    description: "Update a user's profile."
+    inputSchema:
+      type: object
+      properties:
+        userId:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+      required: ["userId", "firstName"]
+    http:
+      method: POST
+      path: "/user/{userId}/update"
+      query:
+        notify: "true"
+      headers:
+        X-Source: "lattice"
+      body:
+        user.name.first: "$firstName"
+        user.name.last: "$lastName"
+        source: "lattice"
+      response:
+        include: ["id", "user.name", "updatedAt"]
+
+  - name: list_dir
+    description: "List a directory."
+    inputSchema:
+      type: object
+      properties:
+        dir:
+          type: string
+      required: ["dir"]
+    cli:
+      command: ls
+      args: ["-la", "$dir"]
+      parse: json
+      response:
+        exclude: ["permissions"]
