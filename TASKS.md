@@ -1,9 +1,9 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. **Phase B engine complete** (T6–T10):
-> value exprs, nested body, HTTP request builder, CLI command builder, response
-> filter — all pure, zero I/O, 67 unit tests. **Milestone 3 reached.** Next: Phase C
-> execution — T11 (HTTP executor) → T12 (auth) ∥ T13 (CLI executor).
+> Status: **Phase 4 (Implement)** — in progress. **Phase B engine complete** (T6–T10,
+> pure, 70 unit tests). **Phase C started: T11 (HTTP executor)** done — reqwest +
+> wiremock, response-filtered `ToolOutcome`, non-2xx → `is_error`. Next: T12 (auth) ∥
+> T13 (CLI executor).
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -120,24 +120,37 @@
 
 ## Phase C — Execution (I/O)
 
-- [ ] **T11 — HTTP executor**
+- [x] **T11 — HTTP executor** ✅
   - Acceptance: runs `HttpRequestSpec` via reqwest against `wiremock`, asserts correct method/url/headers/body, returns filtered body; non-2xx → `isError` with filtered body.
   - Verify: `cargo test --test http_integration`.
   - Files: `src/exec/mod.rs`, `src/exec/http.rs`, `tests/http_integration.rs`.
-  - Also (from T4 review): when logging requests, redact secret-bearing value-leaves
-    (headers/query/body can hold interpolated `${ENV}` secrets — only `Auth` is
-    redacted today). Never log a whole request/Config; log curated non-secret fields.
-  - From T7–T10 review (security + quality subagents):
-    - **Percent-encode path-var substitutions** — T8 concatenates resolved `{var}` values
-      into the URL verbatim; a model-supplied value with `/`, `..`, `?`, `#`, `%` can alter
-      URL structure (intra-API, not cross-host). Encode path segments here.
-    - Build headers via reqwest's `HeaderValue` (rejects CRLF/control chars); let reqwest
-      percent-encode query pairs.
-    - **Never `Debug`-log `HttpRequestSpec`/`CommandSpec`** — they carry resolved
-      secrets (headers/body/query/env/stdin). Both derive `Debug` for tests only.
-    - `ValueError::Template(..)` carries minijinja's error string, which can include
-      operator template source (possibly a `${SECRET}` interpolated at load) — scrub before
-      surfacing in a logged request error.
+  - Note: `exec::http::execute(client, spec, response_spec) -> ToolOutcome {is_error, value}`.
+    Non-2xx → `is_error: true` with the **filtered** body (a tool error the model sees);
+    `ExecError` is reserved for genuine transport failures (no response). Response body is
+    JSON when it parses, else the raw text as a string; then `response::filter` is applied.
+    Added deps: `reqwest` (rustls, no native-tls) + `wiremock` (dev). 10 integration tests
+    + 2 unit tests. Auth application is a clean seam (`to_reqwest_request`) for T12.
+  - Hardening addressed (T4 + T7–T10 + T11 reviews, both subagents Approve):
+    - **Path-var percent-encoding** at the correct layer — `value::resolve_path` strictly
+      path-segment-encodes each substituted value (operator separators untouched) **and**
+      rejects a lone `.`/`..` (`ValueError::UnsafePathVar`) which encoding can't neutralize.
+      Round-trip integration test confirms `a/b c` → `/items/a%2Fb%20c` survives reqwest.
+    - Headers built via `HeaderName`/`HeaderValue` (reject CRLF/controls); query pairs
+      percent-encoded by reqwest's `.query()`. CRLF-rejection test asserts no value leak.
+    - **Per-request 30s timeout** (defense-in-depth vs hanging upstream) and a **10 MiB
+      response-body cap** (`read_body`, streamed via `chunk()`) → `ResponseTooLarge`.
+    - No whole-spec logging — one curated `debug!` (method + status only). Transport errors
+      scrubbed via `reqwest::Error::without_url()`; `InvalidHeader` carries only the name.
+  - Deferred to T12/T14 (tracked):
+    - At the production `Client` builder (T14): `redirect::Policy::none()` (a hostile
+      upstream could 302 to an internal host; reqwest doesn't strip *custom* auth headers on
+      cross-host redirects) + `connect_timeout`; make timeout/size limits configurable.
+    - Map a model-input-triggered build failure (e.g. `InvalidHeader`) to an `is_error`
+      result at the MCP wiring layer so the model can correct it, not a hard error.
+    - T12: warn when an auth secret would be sent over cleartext `http://`.
+    - Never `Debug`-log `HttpRequestSpec`/`CommandSpec` at call sites; scrub
+      `ValueError::Template(..)` before surfacing in a logged request error.
+    - Docs (T19): warn against putting a `{placeholder}` in a `base_url`-less authority.
 
 - [ ] **T12 — Auth (bearer/basic/api_key + oauth2)**
   - Acceptance: each auth type adds correct header/query; oauth2 client-credentials fetches token from mock `token_url`, caches with expiry margin, single-flight refresh, refreshes on 401; secrets redacted in logs.

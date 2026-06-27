@@ -17,6 +17,9 @@ path = "src/lib.rs"
 # Official Rust MCP SDK. `transport-io` adds the stdio() transport; the default
 # `server` feature pulls in transport-async-rw used for in-memory/duplex transports.
 rmcp = { version = "1", features = ["transport-io"] }
+# HTTP client for the executor. rustls (no OpenSSL); default features off keeps the
+# footprint lean (no native-tls). `json` is kept for ergonomics/future use.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "process", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,3 +43,5 @@ rmcp = { version = "1", features = ["client"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
 anyhow = "1"
 serde_json = "1"
+# Mock HTTP server for executor integration tests.
+wiremock = "0.6"

@@ -40,6 +40,10 @@ pub enum ValueError {
     /// A path `{name}` resolved to a non-scalar (object/array/null) value.
     #[error("path variable '{0}' is not a string, number, or boolean")]
     NonScalarPathVar(String),
+    /// A path `{name}` resolved to a dot-segment (`.` or `..`), which URL normalization
+    /// would collapse into traversal to a different endpoint.
+    #[error("path variable '{0}' is '.' or '..', which is not allowed in a URL path")]
+    UnsafePathVar(String),
     /// A `{{ ... }}` template failed to render.
     #[error("template error: {0}")]
     Template(String),
@@ -137,6 +141,12 @@ pub fn resolve_optional(value: &Value, ctx: &Ctx) -> Result<Option<Value>, Value
 /// Resolve a path/string template containing `{name}` placeholders, substituting each
 /// with its (scalar) input value. Literal text and non-placeholder braces are kept
 /// verbatim. Used for URL paths like `/user/{userId}/update`.
+///
+/// Substituted values are **percent-encoded as URL path segments** ([`encode_path_segment`])
+/// so a model-supplied value can't inject extra path structure (`/`, `?`, `#`, `%`, …) —
+/// the operator's literal separators are preserved, only the interpolated value is encoded.
+/// A value that is exactly `.` or `..` is rejected ([`ValueError::UnsafePathVar`]): encoding
+/// can't neutralize a lone dot-segment, which URL normalization would turn into traversal.
 pub fn resolve_path(template: &str, ctx: &Ctx) -> Result<String, ValueError> {
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
@@ -159,7 +169,10 @@ pub fn resolve_path(template: &str, ctx: &Ctx) -> Result<String, ValueError> {
                 lookup(ctx.input, &name).ok_or_else(|| ValueError::MissingPathVar(name.clone()))?;
             let rendered = scalar_to_string(value)
                 .ok_or_else(|| ValueError::NonScalarPathVar(name.clone()))?;
-            out.push_str(&rendered);
+            if rendered == "." || rendered == ".." {
+                return Err(ValueError::UnsafePathVar(name.clone()));
+            }
+            out.push_str(&encode_path_segment(&rendered));
         } else {
             // Not a `{name}` placeholder (e.g. `{{ ... }}` or an invalid name) — verbatim.
             out.push('{');
@@ -233,6 +246,48 @@ fn is_ident(s: &str) -> bool {
 
 fn is_index(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Percent-encode a value for use as a single URL path segment.
+///
+/// Leaves RFC 3986 `pchar`-safe bytes — unreserved (`A–Z a–z 0–9 - . _ ~`), sub-delims
+/// (`! $ & ' ( ) * + , ; =`), and `: @` — verbatim; everything else (notably the
+/// structural `/ ? # %`, spaces, control bytes, and non-ASCII) is `%XX`-escaped. This is a
+/// strict allowlist (stricter than the `url` crate's path-segment blocklist) so a
+/// model-supplied value can't alter the URL's path/query/fragment structure.
+fn encode_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        let safe = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            );
+        if safe {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    out
 }
 
 /// String/number/bool render to a scalar string (path segment, query/header value);
@@ -370,6 +425,36 @@ mod value_expr_tests {
             resolve_path("/a/{not a var}/b", &ctx).unwrap(),
             "/a/{not a var}/b"
         );
+    }
+
+    #[test]
+    fn path_var_values_are_percent_encoded() {
+        let input = json!({ "id": "a/b", "q": "x?y#z", "name": "a b", "ok": "A-9_z.~" });
+        let ctx = ctx(&input);
+        // Structural characters in a model-supplied value can't escape the segment.
+        assert_eq!(resolve_path("/u/{id}/x", &ctx).unwrap(), "/u/a%2Fb/x");
+        assert_eq!(resolve_path("/s/{q}", &ctx).unwrap(), "/s/x%3Fy%23z");
+        assert_eq!(resolve_path("/s/{name}", &ctx).unwrap(), "/s/a%20b");
+        // Unreserved characters are preserved verbatim.
+        assert_eq!(resolve_path("/s/{ok}", &ctx).unwrap(), "/s/A-9_z.~");
+        // The operator's literal separators are untouched — only the value is encoded.
+        assert_eq!(resolve_path("/a/b/{id}", &ctx).unwrap(), "/a/b/a%2Fb");
+    }
+
+    #[test]
+    fn path_var_rejects_dot_segments() {
+        let input = json!({ "id": "..", "cur": ".", "ok": "a.b" });
+        let ctx = ctx(&input);
+        assert_eq!(
+            resolve_path("/users/{id}", &ctx).unwrap_err(),
+            ValueError::UnsafePathVar("id".into())
+        );
+        assert_eq!(
+            resolve_path("/x/{cur}", &ctx).unwrap_err(),
+            ValueError::UnsafePathVar("cur".into())
+        );
+        // A dot inside a longer value is fine — only a lone dot-segment is rejected.
+        assert_eq!(resolve_path("/x/{ok}", &ctx).unwrap(), "/x/a.b");
     }
 
     #[test]
