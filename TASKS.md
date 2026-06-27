@@ -1,7 +1,9 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. Phase A (T1–T5) + **T6 (value
-> expressions)** complete. Engine started. Next: T7 (nested body builder).
+> Status: **Phase 4 (Implement)** — in progress. **Phase B engine complete** (T6–T10):
+> value exprs, nested body, HTTP request builder, CLI command builder, response
+> filter — all pure, zero I/O, 67 unit tests. **Milestone 3 reached.** Next: Phase C
+> execution — T11 (HTTP executor) → T12 (auth) ∥ T13 (CLI executor).
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -63,30 +65,58 @@
     strings (lenient undefined); paths use `{name}` sugar via `resolve_path`. `resolve`
     recurses into arrays/objects.
 
-- [ ] **T7 — Nested body builder**
+- [x] **T7 — Nested body builder** ✅
   - Acceptance: dotted target-path keys build/merge nested JSON (`user.name.first`+`user.name.last`→`{user:{name:{first,last}}}`); `body_from:$ref` passthrough.
   - Verify: `cargo test body_builder`.
   - Files: `src/engine/body.rs`.
   - Note (from T6 review): use `value::resolve_optional` so a body entry whose `$ref`
     targets an absent optional input is **omitted** rather than erroring; present-but-null
     refs are kept.
+  - Note: `build_body(body, body_from, ctx) -> Option<Value>` (decoupled from `HttpTarget`
+    for testability). Empty / fully-omitted body → `None` (no body sent); `body_from` wins
+    over `body` (mutually exclusive post-T5). Dotted insert detects the only reachable
+    conflict — descending through a key already set as a leaf (`user` then `user.name`);
+    the reverse can't occur because `BTreeMap` yields a prefix key before its extension.
+    Content-type/serialization left to T8.
 
-- [ ] **T8 — HTTP request builder (pure)**
+- [x] **T8 — HTTP request builder (pure)** ✅
   - Acceptance: `Tool.http`+input → `HttpRequestSpec{method,url,query,headers,body,content_type}`; path vars filled; missing path var → error.
   - Verify: `cargo test http_request_builder`.
   - Files: `src/engine/request.rs`.
   - Note (from T6 review): when resolving many template leaves per request, reuse a
     single minijinja `Environment` (T6's `render` builds one per call).
+  - Note: addressed the env-reuse — `value::template_env()` is a process-wide `OnceLock`
+    `Environment` (fuel is per-render, so sharing is safe). Builder consumes the
+    defaults-merged `HttpTarget` (base_url/headers/auth already resolved by
+    `apply_defaults`). query/headers use `resolve_optional` (omit absent), fan arrays into
+    repeated pairs, drop `null`, error on objects; body via T7; content-type defaults to
+    `application/json` unless the tool sets its own `Content-Type`. URL/query are **not**
+    percent-encoded and header values **not** CRLF-checked here — left to reqwest in T11.
+  - For T11: validate/encode at the boundary — reqwest must reject control chars in header
+    values (CRLF injection) and percent-encode query pairs derived from model input.
 
-- [ ] **T9 — CLI command builder (pure)**
+- [x] **T9 — CLI command builder (pure)** ✅
   - Acceptance: `Tool.cli`+input → `CommandSpec{program,argv,stdin,env,cwd}`; value-expr substitution; array input flattens to multiple args; no shell.
   - Verify: `cargo test cli_command_builder`.
   - Files: `src/engine/command.rs`.
+  - Note: `build_command(target, ctx)`. `program` is the literal config string (**never** a
+    value expr) — model input can't choose the binary; args/env/stdin/cwd resolve via value
+    exprs and become distinct argv/env entries (argv-only, no shell). args fan arrays out,
+    omit absent/`null`; env omits absent/`null`, errors on objects; stdin pipes a string
+    verbatim / other JSON compactly / none for absent-null; cwd is a single scalar or
+    inherit. Shared `value::scalarize` helper (also refactored into T8's request builder).
+  - For T13: env/stdin values may carry interpolated `${ENV}` secrets — redact at the log
+    boundary; cap captured stdout size; note relative `program` + model-controlled `cwd`.
 
-- [ ] **T10 — Response filter**
+- [x] **T10 — Response filter** ✅
   - Acceptance: include keeps only listed dotted paths (nested), exclude drops them, neither → unchanged; parse modes raw/json/lines.
   - Verify: `cargo test response_filter`.
   - Files: `src/engine/response.rs`.
+  - Note: `parse_output(text, mode)` (raw→string, json→parsed value w/ error, lines→array,
+    `str::lines` handles `\r\n`) + `filter(value, spec)`. Dotted paths navigate **objects**
+    only (array indices unaddressed — documented boundary); non-object values (arrays,
+    scalars, raw/lines output) pass `filter` through unchanged. `include` rebuilds a pruned
+    object, `exclude` removes in place, neither → as-is; `include` wins if both set.
 
 ## Phase C — Execution (I/O)
 
@@ -97,6 +127,17 @@
   - Also (from T4 review): when logging requests, redact secret-bearing value-leaves
     (headers/query/body can hold interpolated `${ENV}` secrets — only `Auth` is
     redacted today). Never log a whole request/Config; log curated non-secret fields.
+  - From T7–T10 review (security + quality subagents):
+    - **Percent-encode path-var substitutions** — T8 concatenates resolved `{var}` values
+      into the URL verbatim; a model-supplied value with `/`, `..`, `?`, `#`, `%` can alter
+      URL structure (intra-API, not cross-host). Encode path segments here.
+    - Build headers via reqwest's `HeaderValue` (rejects CRLF/control chars); let reqwest
+      percent-encode query pairs.
+    - **Never `Debug`-log `HttpRequestSpec`/`CommandSpec`** — they carry resolved
+      secrets (headers/body/query/env/stdin). Both derive `Debug` for tests only.
+    - `ValueError::Template(..)` carries minijinja's error string, which can include
+      operator template source (possibly a `${SECRET}` interpolated at load) — scrub before
+      surfacing in a logged request error.
 
 - [ ] **T12 — Auth (bearer/basic/api_key + oauth2)**
   - Acceptance: each auth type adds correct header/query; oauth2 client-credentials fetches token from mock `token_url`, caches with expiry margin, single-flight refresh, refreshes on 401; secrets redacted in logs.

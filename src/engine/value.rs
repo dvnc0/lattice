@@ -22,6 +22,8 @@
 //! empty (per Jinja) — and always produce a **string**. There is no escape for `{{`: a
 //! literal value that contains `{{` is treated as a template.
 
+use std::sync::OnceLock;
+
 use minijinja::{context, Environment};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -187,11 +189,25 @@ fn lookup<'a>(input: &'a Value, path: &str) -> Option<&'a Value> {
 /// driven by model-supplied `input`, so cap execution defensively.
 const TEMPLATE_FUEL: u64 = 100_000;
 
+/// A process-wide template environment, configured once and shared.
+///
+/// minijinja renders against `&self` and treats fuel as a *per-render* budget, so one
+/// environment is safe to reuse across every leaf and thread — avoiding a fresh
+/// allocation (and fuel reconfiguration) for each template, which adds up when a single
+/// request resolves many template leaves.
+fn template_env() -> &'static Environment<'static> {
+    static ENV: OnceLock<Environment<'static>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        let mut env = Environment::new();
+        env.set_fuel(Some(TEMPLATE_FUEL));
+        env
+    })
+}
+
 /// Render a minijinja template with the call input exposed as `input`.
 fn render(template: &str, ctx: &Ctx) -> Result<String, ValueError> {
-    let mut env = Environment::new();
-    env.set_fuel(Some(TEMPLATE_FUEL));
-    env.render_str(template, context! { input => ctx.input })
+    template_env()
+        .render_str(template, context! { input => ctx.input })
         .map_err(|err| ValueError::Template(err.to_string()))
 }
 
@@ -219,13 +235,37 @@ fn is_index(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// String/number/bool render to a path segment; null/array/object cannot.
-fn scalar_to_string(value: &Value) -> Option<String> {
+/// String/number/bool render to a scalar string (path segment, query/header value);
+/// null/array/object cannot.
+pub(crate) fn scalar_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
         Value::Bool(b) => Some(b.to_string()),
         Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+/// Flatten a resolved value into the scalar strings for a positional/named slot — argv
+/// elements, query params, header values. A scalar yields one string; an array fans out
+/// into one string per element, skipping `null` elements; a `null` (top-level or array
+/// element) contributes nothing. Returns `None` if the value — or a non-null array element
+/// — is a non-scalar (object/nested array), which callers turn into a context-specific
+/// error.
+pub(crate) fn scalarize(value: &Value) -> Option<Vec<String>> {
+    match value {
+        Value::Null => Some(Vec::new()),
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                if item.is_null() {
+                    continue; // a null element is dropped, like a top-level null
+                }
+                out.push(scalar_to_string(item)?);
+            }
+            Some(out)
+        }
+        scalar => scalar_to_string(scalar).map(|s| vec![s]),
     }
 }
 
