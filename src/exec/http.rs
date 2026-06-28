@@ -13,9 +13,10 @@
 use std::time::Duration;
 
 use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
-use reqwest::{Client, Method, RequestBuilder};
+use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde_json::Value;
 
+use super::auth::{Applied, AuthState};
 use super::{ExecError, ToolOutcome};
 use crate::config::ResponseSpec;
 use crate::engine::{response, HttpRequestSpec};
@@ -31,16 +32,16 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Execute an HTTP request spec, returning the response-filtered outcome.
+///
+/// `auth`, when present, is applied to the request; an OAuth2 tool that receives a `401`
+/// gets one token-refresh-and-retry before the response is accepted.
 pub async fn execute(
     client: &Client,
     spec: &HttpRequestSpec,
     response_spec: &ResponseSpec,
+    auth: Option<&AuthState>,
 ) -> Result<ToolOutcome, ExecError> {
-    let response = to_reqwest_request(client, spec)?
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(|err| ExecError::Request(scrub(err)))?;
+    let response = send(client, spec, auth).await?;
 
     let status = response.status();
     let text = read_body(response, MAX_RESPONSE_BYTES).await?;
@@ -53,6 +54,49 @@ pub async fn execute(
         is_error: !status.is_success(),
         value: response::filter(body, response_spec),
     })
+}
+
+/// Apply auth and send, with a single OAuth2 refresh-and-retry on `401`.
+async fn send(
+    client: &Client,
+    spec: &HttpRequestSpec,
+    auth: Option<&AuthState>,
+) -> Result<Response, ExecError> {
+    let base = to_reqwest_request(client, spec)?;
+    let Some(auth) = auth else {
+        return dispatch(base).await;
+    };
+
+    // Only OAuth2 can retry, so only clone the request (for the retry) in that case.
+    // `try_clone` succeeds whenever the body is in memory, which it always is here (the
+    // request builder sets a `Vec<u8>` body); the `None` arm below is purely defensive.
+    let retry = auth.is_oauth().then(|| base.try_clone()).flatten();
+    match auth.apply(client, base).await? {
+        Applied::Ready(request) => dispatch(request).await,
+        Applied::OAuth { request, token } => {
+            let response = dispatch(request).await?;
+            if response.status() != StatusCode::UNAUTHORIZED {
+                return Ok(response);
+            }
+            // A 401: refresh the token once and retry (bounded to a single retry).
+            match retry {
+                Some(retry) => {
+                    let retry = auth.reauthorize(client, retry, &token).await?;
+                    dispatch(retry).await
+                }
+                None => Ok(response),
+            }
+        }
+    }
+}
+
+/// Send a built request with the per-request timeout, mapping transport errors.
+async fn dispatch(request: RequestBuilder) -> Result<Response, ExecError> {
+    request
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|err| ExecError::Request(scrub(err)))
 }
 
 /// Read a response body into a string, aborting once `limit` bytes have been buffered.

@@ -13,10 +13,13 @@
 //! for genuine I/O failures (couldn't reach the server, a malformed request, a serialize
 //! failure) that produce no usable response at all.
 
+pub mod auth;
 pub mod http;
 
 use serde_json::Value;
 use thiserror::Error;
+
+use auth::AuthError;
 
 /// The result of executing a tool: a filtered value and whether it represents an error
 /// the model should see (non-2xx HTTP / non-zero CLI exit).
@@ -47,6 +50,9 @@ pub enum ExecError {
     /// The response body exceeded the maximum size we will buffer.
     #[error("response body exceeded the {limit}-byte limit")]
     ResponseTooLarge { limit: usize },
+    /// Authentication failed (e.g. an OAuth2 token could not be obtained).
+    #[error(transparent)]
+    Auth(#[from] AuthError),
     /// The HTTP request could not be completed (DNS/connect/timeout/transport). The
     /// message is taken from `reqwest` with the URL stripped to avoid leaking secrets.
     #[error("HTTP request failed: {0}")]

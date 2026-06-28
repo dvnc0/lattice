@@ -1,9 +1,10 @@
 # Tasks: Lattice
 
 > Status: **Phase 4 (Implement)** — in progress. **Phase B engine complete** (T6–T10,
-> pure, 70 unit tests). **Phase C started: T11 (HTTP executor)** done — reqwest +
-> wiremock, response-filtered `ToolOutcome`, non-2xx → `is_error`. Next: T12 (auth) ∥
-> T13 (CLI executor).
+> pure, 73 unit tests). **Phase C: T11 (HTTP executor) + T12 (auth) done** — reqwest +
+> wiremock, response-filtered `ToolOutcome`, all four auth schemes incl. oauth2
+> cache/refresh (16 integration tests). Next: T13 (CLI executor), then Phase D (MCP
+> surface) starting at T14.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -152,10 +153,24 @@
       `ValueError::Template(..)` before surfacing in a logged request error.
     - Docs (T19): warn against putting a `{placeholder}` in a `base_url`-less authority.
 
-- [ ] **T12 — Auth (bearer/basic/api_key + oauth2)**
+- [x] **T12 — Auth (bearer/basic/api_key + oauth2)** ✅
   - Acceptance: each auth type adds correct header/query; oauth2 client-credentials fetches token from mock `token_url`, caches with expiry margin, single-flight refresh, refreshes on 401; secrets redacted in logs.
   - Verify: `cargo test --test http_integration auth_*`.
   - Files: `src/exec/auth.rs`, `src/exec/http.rs`, `tests/http_integration.rs`.
+  - Note: `AuthState::new(Auth)` holds the scheme + an `OAuthCache`, created once per tool
+    so the token cache persists. `execute` gained an `Option<&AuthState>`. Static schemes
+    (bearer/basic/api_key) are applied via reqwest (`bearer_auth`/`basic_auth`/header|query).
+    OAuth2 client-credentials: single-slot cache, **single-flight** (async mutex held across
+    the fetch), 60s expiry margin; `execute` does one **refresh-and-retry on 401** (clones
+    the request only for oauth). Secrets never logged; `AuthError` messages carry only a
+    status code / URL-scrubbed transport error — never the token or client secret. 9
+    `auth_*` integration tests (caching: 1 fetch / 2 calls; refresh: 2 fetches on 401;
+    token-endpoint failure; missing `access_token`; expiry-margin refetch).
+  - Review fixes (security + quality subagents, both Approve, no leaks): clamp token
+    lifetime to ≤24h (a hostile `expires_in` would overflow `Instant +` → panic) and cap
+    the token-response body at 64 KiB (`read_token_body`, mirroring the main-path guard).
+  - Carried forward to T14 (Client builder): `redirect::Policy::none()` + `connect_timeout`;
+    warn when an auth secret would ride cleartext `http://`; make timeouts configurable.
 
 - [ ] **T13 — CLI executor**
   - Acceptance: runs `CommandSpec` via tokio::process against a real test script; captures stdout/stderr/exit; `parse:json` filtered; non-zero exit → `isError` with stderr.
