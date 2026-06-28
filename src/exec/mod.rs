@@ -3,8 +3,8 @@
 //! The engine ([`crate::engine`]) is pure — it turns config + a call's input into an
 //! [`HttpRequestSpec`](crate::engine::HttpRequestSpec) or
 //! [`CommandSpec`](crate::engine::CommandSpec). This module *runs* those specs: [`http`]
-//! sends HTTP requests via `reqwest` (T11), with auth (T12) and the CLI executor (T13)
-//! landing alongside it.
+//! sends HTTP requests via `reqwest` (T11) with auth ([`auth`], T12), and [`cli`] runs
+//! commands via `tokio::process` (T13).
 //!
 //! Both executors converge on a [`ToolOutcome`]: the (response-filtered) result value plus
 //! an `is_error` flag. A non-success HTTP status / non-zero exit is **not** a transport
@@ -14,11 +14,13 @@
 //! failure) that produce no usable response at all.
 
 pub mod auth;
+pub mod cli;
 pub mod http;
 
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::engine::ResponseError;
 use auth::AuthError;
 
 /// The result of executing a tool: a filtered value and whether it represents an error
@@ -47,8 +49,9 @@ pub enum ExecError {
     /// The request body could not be serialized.
     #[error("failed to serialize request body: {0}")]
     Body(String),
-    /// The response body exceeded the maximum size we will buffer.
-    #[error("response body exceeded the {limit}-byte limit")]
+    /// A captured output (HTTP response body / command stdout|stderr) exceeded the
+    /// maximum size we will buffer.
+    #[error("output exceeded the {limit}-byte limit")]
     ResponseTooLarge { limit: usize },
     /// Authentication failed (e.g. an OAuth2 token could not be obtained).
     #[error(transparent)]
@@ -57,4 +60,11 @@ pub enum ExecError {
     /// message is taken from `reqwest` with the URL stripped to avoid leaking secrets.
     #[error("HTTP request failed: {0}")]
     Request(String),
+    /// A command could not be spawned, or its I/O / wait failed (T13). The message is the
+    /// OS error; argv/env/stdin (which may carry secrets) are never included.
+    #[error("command execution failed: {0}")]
+    Process(String),
+    /// A command's stdout could not be parsed per the configured `parse` mode.
+    #[error(transparent)]
+    Parse(#[from] ResponseError),
 }

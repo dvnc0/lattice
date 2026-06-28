@@ -1,10 +1,10 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. **Phase B engine complete** (T6–T10,
-> pure, 73 unit tests). **Phase C: T11 (HTTP executor) + T12 (auth) done** — reqwest +
-> wiremock, response-filtered `ToolOutcome`, all four auth schemes incl. oauth2
-> cache/refresh (16 integration tests). Next: T13 (CLI executor), then Phase D (MCP
-> surface) starting at T14.
+> Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13):
+> pure engine (74 unit tests) + execution layer — HTTP executor, all four auth schemes
+> (oauth2 cache/refresh), and CLI executor (19 HTTP + 9 CLI integration tests). Next:
+> **Phase D — MCP surface, starting at T14** (config-driven tools over the rmcp server;
+> the deferred `Client`-builder hardening lands here). Then T15 (stdio), T16+.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -172,10 +172,34 @@
   - Carried forward to T14 (Client builder): `redirect::Policy::none()` + `connect_timeout`;
     warn when an auth secret would ride cleartext `http://`; make timeouts configurable.
 
-- [ ] **T13 — CLI executor**
+- [x] **T13 — CLI executor** ✅
   - Acceptance: runs `CommandSpec` via tokio::process against a real test script; captures stdout/stderr/exit; `parse:json` filtered; non-zero exit → `isError` with stderr.
   - Verify: `cargo test --test cli_integration`.
   - Files: `src/exec/cli.rs`, `tests/cli_integration.rs`, `tests/fixtures/script.sh`.
+  - Note: `cli::execute(spec, parse, response_spec) -> ToolOutcome`. argv-only (no shell).
+    Non-zero exit / signal → `is_error: true` with `{exit_code, stderr}`; `parse_output`
+    (raw/json/lines) + `response::filter` on success; `parse: json` mismatch / spawn / I/O
+    → `ExecError` (`Process`/`Parse`/`ResponseTooLarge`). stdin is written **concurrently**
+    with draining stdout+stderr (`try_join!`) to avoid a pipe deadlock; each stream capped
+    at 10 MiB; whole run has a 120s timeout (`kill_on_drop`). Log line carries only program
+    + exit code — never argv/env/stdin/output (may hold `${ENV}` secrets). Added tokio
+    `io-util`/`time` features. 11 integration tests (incl. signal-kill → null exit, and
+    `parse:json` mismatch → `ExecError::Parse`) + 1 cap unit test.
+  - Deferred hardening (from T13 security review, all rated Consider — proper fixes are
+    config-model/design decisions, not executor one-liners):
+    - **Env-secret inheritance:** CLI children inherit Lattice's full process env, which
+      holds `${ENV}` secrets used for HTTP/OAuth auth — a tool that dumps env (or a
+      model-controlled path reading `/proc/self/environ`) could surface them. Needs an
+      env-passthrough policy (`.env_clear()` + allowlist, or scrub interpolation-consumed
+      var names). Track for a config-model `cli.env` policy.
+    - **Program/loader hijack:** a bare `command` + a model-influenced `env` `PATH`/
+      `LD_PRELOAD`/`LD_*`/`DYLD_*` (or a relative program + model-controlled `cwd`) can
+      redirect which binary/loader runs. Add `check`-mode validation: prefer an absolute
+      `program`; reject loader-control keys in `env`.
+    - **Process-group reaping:** `kill_on_drop` SIGKILLs only the direct child; a
+      double-forking child orphans grandchildren (and can hold the pipes open until the
+      timeout). Consider `setsid` via `pre_exec` + `killpg` (Unix, `unsafe`).
+    - CLI timeout (120s) is fixed — make it operator-configurable (with the env policy).
 
 ## Phase D — MCP surface
 
