@@ -1,8 +1,8 @@
 //! `lattice` — config-driven MCP shell binary.
 //!
 //! Loads a config (T3–T5), builds config-driven tools over the engine (T6–T10) and
-//! executors (T11–T13), and serves them as an MCP server over stdio (T14). The
-//! Streamable HTTP transport (T18) arrives in a later task.
+//! executors (T11–T13), and serves them as an MCP server over **stdio** (T14) or, with
+//! `--http <addr>`, over the **Streamable HTTP** transport (T18).
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
-    /// Also serve over Streamable HTTP at this address (e.g. 127.0.0.1:8080).
+    /// Serve over Streamable HTTP at this address instead of stdio (e.g. 127.0.0.1:8080).
     #[arg(long, global = true)]
     http: Option<String>,
 
@@ -44,12 +44,10 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Command::Check) => check(cli.config.as_deref()),
-        None => {
-            if let Some(addr) = &cli.http {
-                tracing::warn!(%addr, "HTTP transport not implemented yet (task T18); serving stdio only");
-            }
-            serve_stdio(cli.config.as_deref()).await
-        }
+        None => match &cli.http {
+            Some(addr) => serve_http(cli.config.as_deref(), addr).await,
+            None => serve_stdio(cli.config.as_deref()).await,
+        },
     }
 }
 
@@ -95,11 +93,7 @@ fn check(config: Option<&Path>) -> anyhow::Result<()> {
 
 /// Serve the config's tools as an MCP server over stdio.
 async fn serve_stdio(config: Option<&Path>) -> anyhow::Result<()> {
-    // Serving requires a config: there are no tools without one.
-    let Some(path) = config else {
-        anyhow::bail!("serving requires --config <path>");
-    };
-    let config = lattice::config::load_config(path)?;
+    let config = load_or_bail(config)?;
     tracing::info!(
         server = %config.server.name,
         tools = config.tools.len(),
@@ -108,4 +102,26 @@ async fn serve_stdio(config: Option<&Path>) -> anyhow::Result<()> {
     let service = LatticeServer::new(config).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Serve the config's tools over the Streamable HTTP transport at `addr` (loopback host
+/// validation by default; bind a loopback address).
+async fn serve_http(config: Option<&Path>, addr: &str) -> anyhow::Result<()> {
+    let config = load_or_bail(config)?;
+    let server = LatticeServer::new(config);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local_addr = listener.local_addr()?;
+    tracing::info!(%local_addr, path = lattice::mcp::HTTP_PATH, "starting lattice MCP server over Streamable HTTP");
+    lattice::mcp::serve_http(listener, server).await?;
+    Ok(())
+}
+
+/// Load and validate a config, failing with a usage error when `--config` is absent
+/// (serving needs a config — there are no tools without one).
+fn load_or_bail(config: Option<&Path>) -> anyhow::Result<lattice::config::Config> {
+    let Some(path) = config else {
+        anyhow::bail!("serving requires --config <path>");
+    };
+    Ok(lattice::config::load_config(path)?)
 }

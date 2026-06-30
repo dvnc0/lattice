@@ -1,10 +1,10 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13)
-> and **T14–T17 done**: config-driven **tools mode** + **dispatcher mode** over stdio,
-> with `inputSchema` validation before any execution (ReDoS-bounded) and a clean JSON-RPC
-> channel. The MCP surface is feature-complete for stdio. Only **T18 (Streamable HTTP
-> transport)** remains in Phase D, then **T19 (examples/README/lint gate)** ships v1.
+> Status: **Phase 4 (Implement)** — in progress. **Phases B + C + D complete** (T6–T18):
+> config-driven **tools** + **dispatcher** modes over both **stdio** and **Streamable
+> HTTP** (`--http`, loopback host-validation by default), with `inputSchema` validation
+> before any execution (ReDoS-bounded) and a stdout-purity guard. Only **Phase E — T19
+> (examples/README/lint gate)** remains to ship v1.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -272,10 +272,24 @@
     operator-authored (no `${ENV}`), compiled a single time; only the instance is
     attacker-influenced. Violation messages echo only the caller's own arguments.
 
-- [ ] **T18 — Streamable HTTP transport**
+- [x] **T18 — Streamable HTTP transport** ✅
   - Acceptance: `--http 127.0.0.1:8080` serves the same tools over Streamable HTTP (loopback default); stdio still works when the flag is absent; an rmcp HTTP client lists+calls a tool.
   - Verify: `cargo test --test http_transport`.
-  - Files: `src/main.rs`, `src/mcp/mod.rs`, `tests/http_transport.rs`.
+  - Files: `src/main.rs`, `src/mcp/mod.rs`, `tests/http_transport.rs`, `Cargo.toml`.
+  - Note: `mcp::serve_http(listener, server)` mounts rmcp's `StreamableHttpService` (a tower
+    Service) on an `axum` router at `mcp::HTTP_PATH` (`/mcp`) with a `LocalSessionManager`;
+    it takes an already-bound `TcpListener` so `main` can log the real address and tests can
+    use an ephemeral port. One Arc-shared `LatticeServer` backs every session. `main` routes
+    `--http <addr>` → `serve_http`, else → `serve_stdio` (now *instead of* stdio, not "also";
+    help/doc updated), sharing a `load_or_bail` config loader. Added deps: `axum` 0.8
+    (http1+tokio only), rmcp `transport-streamable-http-server` (+ dev
+    `transport-streamable-http-client-reqwest`), tokio `net`. 1 HTTP roundtrip test (real
+    HTTP, mocked upstream).
+  - **Secure by default**: `StreamableHttpServerConfig::default()` validates the inbound
+    `Host` against loopback only (`localhost`/`127.0.0.1`/`::1`) — DNS-rebinding protection.
+    Deferred to **T19 docs**: a public deployment needs TLS + auth + an `allowed_hosts`
+    override (no override flag is exposed yet); note the dev tree carries a second `reqwest`
+    (0.13) via the rmcp client transport.
 
 ## Phase E — Polish
 
