@@ -1,11 +1,11 @@
 # Tasks: Lattice
 
 > Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13)
-> and **T14 done**: the rmcp server now serves config-driven tools (tools mode) end to
-> end — `list_tools` (verbatim schema) + `call_tool` → engine → exec → filter →
-> `CallToolResult`, with the production `Client` builder (no redirects, connect timeout).
-> Next: **T15 (stdio purity)**, then T16+. The **MVP** (config-driven HTTP tool callable
-> over stdio) is effectively reached pending T15's stdout-purity guard.
+> and **T14 + T15 done** → **MVP reached**: `lattice --config X` serves config-driven
+> tools over stdio end to end — `list_tools` (verbatim schema) + `call_tool` → engine →
+> exec → filter → `CallToolResult`, production `Client` builder (no redirects, connect
+> timeout), and a subprocess test proving stdout is **only** framed JSON-RPC (logs →
+> stderr). Next: **T16 (dispatcher mode)**, then T17/T18.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -225,10 +225,19 @@
     interpolated secret). Still deferred: operator-configurable timeouts/size caps; the
     CLI env-passthrough/loader-hijack policy (T13 notes) — track for the config model.
 
-- [ ] **T15 — stdio wiring + stdout purity**
+- [x] **T15 — stdio wiring + stdout purity** ✅
   - Acceptance: `lattice --config X` serves over stdio; a test asserts stdout carries **only** framed JSON-RPC (no log/print leakage).
   - Verify: `cargo test stdio_purity`.
-  - Files: `src/main.rs`, `src/mcp/mod.rs`, `tests/stdio_purity.rs`.
+  - Files: `src/main.rs`, `src/mcp/mod.rs`, `tests/stdio_purity.rs`, `tests/fixtures/stdio.yaml`.
+  - Note: the stdio serving wiring already landed in T2/T14 (`serve_stdio` builds the
+    server and serves `stdio()`; `init_tracing` → stderr), so **no production change was
+    needed** — T15 adds the regression guard. `tests/stdio_purity.rs` spawns the **real
+    binary** (`CARGO_BIN_EXE_lattice`) with `--config tests/fixtures/stdio.yaml`, drives a
+    minimal newline-delimited handshake (initialize / initialized / tools/list) over
+    stdin, then closes stdin (EOF → graceful shutdown). Asserts every non-empty stdout
+    line parses as JSON-RPC, that tools/list really returned the configured tool, and that
+    the startup log lands on **stderr** (not stdout). The child's `RUST_LOG` is pinned to
+    `info` so the stderr-log assertion is independent of the caller's environment.
 
 - [ ] **T16 — Dispatcher mode**
   - Acceptance: `expose: dispatcher` → `tools/list` returns exactly `describe_route`+`call_route`; auto-generated server `instructions` embed the route catalog (name+description, no schemas); `describe_route(name)`→schema/detail; `call_route(name,params)`→validate vs route schema→engine+exec; bad route/params → clear isError.

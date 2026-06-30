@@ -1,0 +1,17 @@
+# Minimal, self-contained config for the stdout-purity test (T15): no ${ENV}
+# requirements and a CLI tool that needs no upstream, so `lattice --config` loads
+# and serves cleanly in CI.
+server:
+  name: stdio-test
+
+tools:
+  - name: noop
+    description: Echo text supplied on stdin (needs no network).
+    inputSchema:
+      type: object
+      properties:
+        text:
+          type: string
+    cli:
+      command: cat
+      stdin: $text
