@@ -14,8 +14,10 @@
 //! are scrubbed of anything that could echo an interpolated `${ENV}` secret (template
 //! sources in particular — see [`safe_value_error`]).
 //!
-//! The dispatcher expose mode (`describe_route`/`call_route`) lands in T16; this handler
-//! always serves tools mode and logs a warning if a config requests dispatcher.
+//! Two expose modes share the same route machinery (and the identical engine path): **tools
+//! mode** lists every route as a first-class tool, while **dispatcher mode** (T16) lists only
+//! `describe_route` + `call_route` and embeds an auto-generated route catalog in the server
+//! instructions — see [`dispatcher`](super::dispatcher).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +31,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::{Map, Value};
 
-use super::result;
+use super::{dispatcher, result};
 use crate::config::{Config, ExposeMode, HttpTarget, Server, Target, Tool as ConfigTool};
 use crate::engine::{
     build_command, build_request, BodyError, CommandError, Ctx, InputSchema, RequestError,
@@ -41,6 +43,9 @@ use crate::exec::{self, ToolOutcome};
 /// How long to wait for a TCP connection before giving up. Redirects are disabled and the
 /// per-request wall-clock cap lives in the executor; this bounds DNS/connect setup.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A JSON object, matching `rmcp`'s tool-argument type (`serde_json::Map<String, Value>`).
+type JsonObject = Map<String, Value>;
 
 /// A configured tool, prepared once at startup for fast per-call dispatch.
 struct PreparedTool {
@@ -61,6 +66,12 @@ struct PreparedTool {
 /// per-tool [`AuthState`], which is not `Clone`, is shared rather than duplicated).
 struct ServerInner {
     info: ServerInfo,
+    /// How tools are surfaced: every route as a tool, or the two dispatcher tools.
+    mode: ExposeMode,
+    /// What `tools/list` returns — the per-route descriptors (tools mode) or
+    /// `describe_route` + `call_route` (dispatcher mode).
+    listed: Vec<Tool>,
+    /// The actual routes (dispatch targets), looked up by name in both modes.
     tools: Vec<PreparedTool>,
     by_name: HashMap<String, usize>,
     client: reqwest::Client,
@@ -75,13 +86,7 @@ pub struct LatticeServer {
 impl LatticeServer {
     /// Build a server from a loaded, defaults-merged [`Config`].
     pub fn new(config: Config) -> Self {
-        if config.server.expose == ExposeMode::Dispatcher {
-            tracing::warn!(
-                "expose: dispatcher is not implemented yet (task T16); serving tools mode"
-            );
-        }
-
-        let info = server_info(&config.server);
+        let mode = config.server.expose;
         let client = build_client();
 
         let mut tools = Vec::with_capacity(config.tools.len());
@@ -109,13 +114,45 @@ impl LatticeServer {
             });
         }
 
+        // The expose mode shapes the listed tools and the server instructions; the routes
+        // themselves (and their dispatch path) are identical across modes.
+        let (listed, info) = build_surface(mode, &config.server, &tools);
+
         Self {
             inner: Arc::new(ServerInner {
                 info,
+                mode,
+                listed,
                 tools,
                 by_name,
                 client,
             }),
+        }
+    }
+
+    /// Validate `input` against a route's schema, then translate + execute it, mapping the
+    /// outcome (or a model-safe failure message) into a [`CallToolResult`]. Shared by tools
+    /// mode (`call_tool`) and dispatcher mode (`call_route`).
+    async fn invoke(&self, prepared: &PreparedTool, input: Value) -> CallToolResult {
+        // Validate against the inputSchema *before* building or running anything: a
+        // violation is an error result listing every problem, and nothing is executed.
+        if let Some(schema) = &prepared.schema {
+            let violations = schema.validate(&input);
+            if !violations.is_empty() {
+                return result::error_result(validation_failure(
+                    &prepared.descriptor.name,
+                    &violations,
+                ));
+            }
+        }
+
+        let ctx = Ctx::new(&input);
+        match self.dispatch(prepared, &ctx).await {
+            Ok(outcome) => result::outcome_to_result(outcome),
+            Err(message) => {
+                tracing::warn!(tool = %prepared.descriptor.name, "tool call failed: {message}");
+                result::error_result(message)
+            }
         }
     }
 
@@ -149,6 +186,58 @@ impl LatticeServer {
             Err(err) => Err(err.to_string()),
         }
     }
+
+    /// Tools mode: dispatch a call to the route named by the request.
+    async fn call_named(&self, request: CallToolRequestParams) -> CallToolResult {
+        let Some(&index) = self.inner.by_name.get(request.name.as_ref()) else {
+            return result::error_result(format!("unknown tool: {}", request.name));
+        };
+        let input = arguments_to_input(request.arguments);
+        self.invoke(&self.inner.tools[index], input).await
+    }
+
+    /// Dispatcher mode: handle the two synthetic tools, `describe_route` and `call_route`.
+    async fn call_dispatcher(&self, request: CallToolRequestParams) -> CallToolResult {
+        let arguments = request.arguments;
+        match request.name.as_ref() {
+            dispatcher::DESCRIBE_ROUTE => self.describe_route(arguments.as_ref()),
+            dispatcher::CALL_ROUTE => self.call_route(arguments).await,
+            other => result::error_result(format!(
+                "unknown tool '{other}'; this server exposes only '{}' and '{}'",
+                dispatcher::DESCRIBE_ROUTE,
+                dispatcher::CALL_ROUTE
+            )),
+        }
+    }
+
+    /// `describe_route(route)` → the route's name, description, and authored input schema.
+    fn describe_route(&self, arguments: Option<&JsonObject>) -> CallToolResult {
+        let route = match dispatcher::route_arg(arguments) {
+            Ok(route) => route,
+            Err(message) => return result::error_result(message),
+        };
+        let Some(&index) = self.inner.by_name.get(route.as_str()) else {
+            return result::error_result(format!("unknown route: {route}"));
+        };
+        let detail = dispatcher::route_detail(&self.inner.tools[index].descriptor);
+        result::outcome_to_result(ToolOutcome {
+            is_error: false,
+            value: detail,
+        })
+    }
+
+    /// `call_route(route, params)` → validate params against the route schema, then execute
+    /// it on the identical engine path as tools mode.
+    async fn call_route(&self, arguments: Option<JsonObject>) -> CallToolResult {
+        let (route, params) = match dispatcher::call_args(arguments) {
+            Ok(parsed) => parsed,
+            Err(message) => return result::error_result(message),
+        };
+        let Some(&index) = self.inner.by_name.get(route.as_str()) else {
+            return result::error_result(format!("unknown route: {route}"));
+        };
+        self.invoke(&self.inner.tools[index], params).await
+    }
 }
 
 impl ServerHandler for LatticeServer {
@@ -161,13 +250,9 @@ impl ServerHandler for LatticeServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = self
-            .inner
-            .tools
-            .iter()
-            .map(|tool| tool.descriptor.clone())
-            .collect();
-        Ok(ListToolsResult::with_all_items(tools))
+        // Precomputed at startup: per-route descriptors (tools mode) or the two dispatcher
+        // tools (dispatcher mode).
+        Ok(ListToolsResult::with_all_items(self.inner.listed.clone()))
     }
 
     async fn call_tool(
@@ -175,57 +260,68 @@ impl ServerHandler for LatticeServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        // Unknown tool → an error *result* (not a protocol error) so the model can react.
-        let Some(&index) = self.inner.by_name.get(request.name.as_ref()) else {
-            return Ok(result::error_result(format!(
-                "unknown tool: {}",
-                request.name
-            )));
-        };
-        let prepared = &self.inner.tools[index];
-
-        // MCP arguments are an optional JSON object; the engine resolves refs against it.
-        let input = request
-            .arguments
-            .map(Value::Object)
-            .unwrap_or_else(|| Value::Object(Map::new()));
-
-        // Validate against the tool's inputSchema *before* building or running anything: a
-        // violation is an error result listing every problem, and nothing is executed.
-        if let Some(schema) = &prepared.schema {
-            let violations = schema.validate(&input);
-            if !violations.is_empty() {
-                return Ok(result::error_result(validation_failure(
-                    &prepared.descriptor.name,
-                    &violations,
-                )));
-            }
-        }
-
-        let ctx = Ctx::new(&input);
-
-        Ok(match self.dispatch(prepared, &ctx).await {
-            Ok(outcome) => result::outcome_to_result(outcome),
-            Err(message) => {
-                tracing::warn!(tool = %prepared.descriptor.name, "tool call failed: {message}");
-                result::error_result(message)
-            }
+        Ok(match self.inner.mode {
+            ExposeMode::Tools => self.call_named(request).await,
+            ExposeMode::Dispatcher => self.call_dispatcher(request).await,
         })
     }
 }
 
-/// Build the [`ServerInfo`] reported at initialization from the config's `server` block.
-fn server_info(server: &Server) -> ServerInfo {
+/// Build the listed tools and [`ServerInfo`] for the chosen expose mode. Tools mode lists
+/// the per-route descriptors and keeps the author's instructions; dispatcher mode lists the
+/// two synthetic tools and embeds an auto-generated route catalog into the instructions
+/// (unless the author supplied their own).
+fn build_surface(
+    mode: ExposeMode,
+    server: &Server,
+    tools: &[PreparedTool],
+) -> (Vec<Tool>, ServerInfo) {
+    match mode {
+        ExposeMode::Tools => {
+            let listed = tools.iter().map(|tool| tool.descriptor.clone()).collect();
+            (listed, server_info(server, server.instructions.clone()))
+        }
+        ExposeMode::Dispatcher => {
+            let catalog = dispatcher::build_catalog(tools.iter().map(|tool| {
+                (
+                    tool.descriptor.name.as_ref(),
+                    tool.descriptor.description.as_deref(),
+                )
+            }));
+            let listed = vec![
+                dispatcher::describe_route_descriptor(),
+                dispatcher::call_route_descriptor(&catalog),
+            ];
+            // An author's `instructions` override the auto-generated dispatcher guide.
+            let instructions = server
+                .instructions
+                .clone()
+                .unwrap_or_else(|| dispatcher::dispatcher_instructions(&catalog));
+            (listed, server_info(server, Some(instructions)))
+        }
+    }
+}
+
+/// Build the [`ServerInfo`] reported at initialization, with the given instructions.
+fn server_info(server: &Server, instructions: Option<String>) -> ServerInfo {
     let version = server
         .version
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
         .with_server_info(Implementation::new(server.name.clone(), version));
-    if let Some(instructions) = &server.instructions {
-        info = info.with_instructions(instructions.clone());
+    if let Some(instructions) = instructions {
+        info = info.with_instructions(instructions);
     }
     info
+}
+
+/// Convert optional MCP call arguments into the engine's input value (an empty object when
+/// absent). The engine resolves `$ref`s against this object.
+fn arguments_to_input(arguments: Option<JsonObject>) -> Value {
+    arguments
+        .map(Value::Object)
+        .unwrap_or_else(|| Value::Object(Map::new()))
 }
 
 /// Build the MCP tool descriptor for `tools/list`, carrying the authored schema verbatim.

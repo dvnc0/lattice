@@ -52,6 +52,28 @@ tools:
       stdin: $text
 "#;
 
+/// The same `get_user` route, but exposed via `expose: dispatcher`.
+const DISPATCHER_CONFIG: &str = r#"
+server:
+  name: dispatcher-test
+  expose: dispatcher
+tools:
+  - name: get_user
+    description: Fetch a user by id.
+    inputSchema:
+      type: object
+      properties:
+        id:
+          type: integer
+      required: [id]
+    http:
+      method: GET
+      path: /users/{id}
+      base_url: __BASE_URL__
+      response:
+        include: [id, name]
+"#;
+
 /// Start a [`LatticeServer`] built from `config_text` on one end of a duplex pipe and
 /// return a connected rmcp client plus the server task handle (abort it when done).
 async fn serve(
@@ -172,6 +194,88 @@ async fn tools_mode_cli_roundtrip() -> anyhow::Result<()> {
         .map(|t| t.text.as_str())
         .unwrap_or_default();
     assert_eq!(text, "hello lattice");
+
+    client.cancel().await?;
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn dispatcher_lists_two_tools_and_routes_calls() -> anyhow::Result<()> {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 42,
+            "name": "Ada",
+            "secret": "hunter2",
+        })))
+        .mount(&mock)
+        .await;
+
+    let config_text = DISPATCHER_CONFIG.replace("__BASE_URL__", &mock.uri());
+    let (client, handle) = serve(&config_text).await?;
+
+    // tools/list shows exactly the two dispatcher tools — not the routes themselves.
+    let tools = client.list_all_tools().await?;
+    let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["call_route", "describe_route"]);
+
+    // The auto-generated instructions embed the route catalog (the route name).
+    let info = client.peer_info().expect("server info after initialize");
+    let instructions = info.instructions.as_deref().unwrap_or_default();
+    assert!(
+        instructions.contains("get_user"),
+        "catalog missing from instructions: {instructions}"
+    );
+
+    // describe_route returns the route's authored input schema.
+    let args = json!({ "route": "get_user" }).as_object().unwrap().clone();
+    let described = client
+        .call_tool(CallToolRequestParams::new("describe_route").with_arguments(args))
+        .await?;
+    assert_eq!(described.is_error, Some(false));
+    let detail = described.structured_content.expect("structured detail");
+    assert_eq!(detail["route"], json!("get_user"));
+    assert!(
+        detail["inputSchema"]["properties"]["id"].is_object(),
+        "describe_route should surface the verbatim schema: {detail}"
+    );
+
+    // call_route translates + executes the route end to end (same engine path as tools mode).
+    let args = json!({ "route": "get_user", "params": { "id": 42 } })
+        .as_object()
+        .unwrap()
+        .clone();
+    let called = client
+        .call_tool(CallToolRequestParams::new("call_route").with_arguments(args))
+        .await?;
+    assert_eq!(called.is_error, Some(false));
+    assert_eq!(
+        called.structured_content,
+        Some(json!({ "id": 42, "name": "Ada" }))
+    );
+
+    // An unknown route → a clear error result.
+    let args = json!({ "route": "nope", "params": {} })
+        .as_object()
+        .unwrap()
+        .clone();
+    let bad_route = client
+        .call_tool(CallToolRequestParams::new("call_route").with_arguments(args))
+        .await?;
+    assert_eq!(bad_route.is_error, Some(true));
+
+    // Params that fail the route's schema are rejected before execution.
+    let args = json!({ "route": "get_user", "params": {} })
+        .as_object()
+        .unwrap()
+        .clone();
+    let bad_params = client
+        .call_tool(CallToolRequestParams::new("call_route").with_arguments(args))
+        .await?;
+    assert_eq!(bad_params.is_error, Some(true));
 
     client.cancel().await?;
     handle.abort();

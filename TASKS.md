@@ -1,11 +1,10 @@
 # Tasks: Lattice
 
 > Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13)
-> and **T14 + T15 done** → **MVP reached** (config-driven tool callable over stdio with a
-> provably clean JSON-RPC channel). **T17 done**: call arguments are validated against the
-> tool's compiled `inputSchema` before anything runs (violations → `isError`, nothing
-> executed; ReDoS-bounded). Next: **T16 (dispatcher mode)** — which builds on T17's
-> validation for `call_route` — then T18.
+> and **T14–T17 done**: config-driven **tools mode** + **dispatcher mode** over stdio,
+> with `inputSchema` validation before any execution (ReDoS-bounded) and a clean JSON-RPC
+> channel. The MCP surface is feature-complete for stdio. Only **T18 (Streamable HTTP
+> transport)** remains in Phase D, then **T19 (examples/README/lint gate)** ships v1.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -239,10 +238,21 @@
     the startup log lands on **stderr** (not stdout). The child's `RUST_LOG` is pinned to
     `info` so the stderr-log assertion is independent of the caller's environment.
 
-- [ ] **T16 — Dispatcher mode**
+- [x] **T16 — Dispatcher mode** ✅
   - Acceptance: `expose: dispatcher` → `tools/list` returns exactly `describe_route`+`call_route`; auto-generated server `instructions` embed the route catalog (name+description, no schemas); `describe_route(name)`→schema/detail; `call_route(name,params)`→validate vs route schema→engine+exec; bad route/params → clear isError.
   - Verify: `cargo test --test mcp_roundtrip dispatcher`.
   - Files: `src/mcp/server.rs`, `src/mcp/dispatcher.rs`, `tests/mcp_roundtrip.rs`.
+  - Note: `src/mcp/dispatcher.rs` is pure surface-shaping — the two synthetic descriptors,
+    the lightweight catalog (route name + first-line summary, **no schemas**), the
+    auto-generated instructions (author `server.instructions` overrides), and `route_arg`/
+    `call_args` parsing. `ServerInner` gained `mode` + a precomputed `listed` (per-route
+    descriptors in tools mode, the two tools in dispatcher mode); `list_tools` returns
+    `listed`. `call_tool` branches on `mode`: tools → `call_named`; dispatcher →
+    `call_dispatcher` (`describe_route` returns name/description/verbatim schema;
+    `call_route` validates `params` vs the route schema then runs it). The route lookup +
+    validation + execution are **shared** via a factored `invoke` — dispatcher and tools
+    mode run the identical engine path. Unknown route / non-object `params` / missing route
+    → clear `isError`. 1 dispatcher roundtrip + 4 dispatcher unit tests.
 
 - [x] **T17 — Runtime input-schema validation** ✅
   - Acceptance: call params validated against the tool's compiled `inputSchema` before any request/command; violations → `isError` listing them, nothing executed. Reuses schemas compiled in T5.
