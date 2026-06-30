@@ -1,9 +1,11 @@
 //! The lattice [`ServerHandler`] — config-driven **tools mode** (task T14).
 //!
 //! `list_tools` returns one MCP tool per configured tool, each carrying its authored
-//! `inputSchema` **verbatim**. `call_tool` looks the tool up by name, resolves the call's
-//! arguments through the pure engine ([`crate::engine`]) into a request/command spec, runs
-//! it through the executor ([`crate::exec`]), and maps the [`ToolOutcome`] into a
+//! `inputSchema` **verbatim**. `call_tool` looks the tool up by name, **validates the
+//! arguments against that schema before doing anything else** (T17 — a violation is an
+//! error result and nothing is executed), then resolves the arguments through the pure
+//! engine ([`crate::engine`]) into a request/command spec, runs it through the executor
+//! ([`crate::exec`]), and maps the [`ToolOutcome`] into a
 //! [`CallToolResult`](rmcp::model::CallToolResult).
 //!
 //! Every failure the model could act on is surfaced as an `isError` **result**, never a
@@ -30,7 +32,8 @@ use serde_json::{Map, Value};
 use super::result;
 use crate::config::{Config, ExposeMode, HttpTarget, Server, Target, Tool as ConfigTool};
 use crate::engine::{
-    build_command, build_request, BodyError, CommandError, Ctx, RequestError, ValueError,
+    build_command, build_request, BodyError, CommandError, Ctx, InputSchema, RequestError,
+    ValueError,
 };
 use crate::exec::auth::AuthState;
 use crate::exec::{self, ToolOutcome};
@@ -45,6 +48,10 @@ struct PreparedTool {
     descriptor: Tool,
     /// The config backing used to build the request/command on each call.
     config: ConfigTool,
+    /// The compiled `inputSchema`, validated against call arguments before execution.
+    /// `None` when the tool authored no schema, or its schema failed to compile (in which
+    /// case validation is skipped and a warning was logged at startup).
+    schema: Option<InputSchema>,
     /// Per-tool auth state (HTTP tools only), created once so an OAuth token cache
     /// survives across calls to this tool.
     auth: Option<AuthState>,
@@ -89,6 +96,7 @@ impl LatticeServer {
                 _ => None,
             };
             let descriptor = descriptor(&tool);
+            let schema = compile_schema(&tool);
             if by_name.insert(tool.name.clone(), tools.len()).is_some() {
                 // MCP tool names must be unique; the later definition shadows the earlier.
                 tracing::warn!(tool = %tool.name, "duplicate tool name; the later definition wins");
@@ -96,6 +104,7 @@ impl LatticeServer {
             tools.push(PreparedTool {
                 descriptor,
                 config: tool,
+                schema,
                 auth,
             });
         }
@@ -180,6 +189,19 @@ impl ServerHandler for LatticeServer {
             .arguments
             .map(Value::Object)
             .unwrap_or_else(|| Value::Object(Map::new()));
+
+        // Validate against the tool's inputSchema *before* building or running anything: a
+        // violation is an error result listing every problem, and nothing is executed.
+        if let Some(schema) = &prepared.schema {
+            let violations = schema.validate(&input);
+            if !violations.is_empty() {
+                return Ok(result::error_result(validation_failure(
+                    &prepared.descriptor.name,
+                    &violations,
+                )));
+            }
+        }
+
         let ctx = Ctx::new(&input);
 
         Ok(match self.dispatch(prepared, &ctx).await {
@@ -220,6 +242,38 @@ fn descriptor(tool: &ConfigTool) -> Tool {
         descriptor.description = None;
     }
     descriptor
+}
+
+/// Compile a tool's `inputSchema` for runtime validation. A tool with no schema isn't
+/// validated (permissive by design); a schema that fails to compile disables validation
+/// for that tool with a warning — the operator should have caught it with `lattice check`,
+/// and the engine boundary is injection-safe regardless. The schema is operator-authored
+/// (no `${ENV}` interpolation), so the compile error is safe to log.
+fn compile_schema(tool: &ConfigTool) -> Option<InputSchema> {
+    if tool.input_schema.is_empty() {
+        return None;
+    }
+    match InputSchema::compile(&tool.input_schema) {
+        Ok(schema) => Some(schema),
+        Err(err) => {
+            tracing::warn!(
+                tool = %tool.name,
+                "{err}; input validation disabled for this tool (run `lattice check`)"
+            );
+            None
+        }
+    }
+}
+
+/// Render schema violations into a single model-facing error message. The violations name
+/// the offending input fields/values (the caller's own arguments) — no secrets.
+fn validation_failure(tool: &str, violations: &[String]) -> String {
+    let mut message = format!("input validation failed for '{tool}':");
+    for violation in violations {
+        message.push_str("\n- ");
+        message.push_str(violation);
+    }
+    message
 }
 
 /// Build the production reqwest client. Redirects are **disabled** (a hostile upstream

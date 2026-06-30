@@ -130,8 +130,8 @@ async fn tools_mode_http_roundtrip() -> anyhow::Result<()> {
         .await?;
     assert_eq!(unknown.is_error, Some(true));
 
-    // A build failure from missing input (the `{id}` path var) surfaces as an error
-    // result the model can correct — not a protocol error — and names the missing field.
+    // Missing required input is rejected by inputSchema validation before anything runs:
+    // an error result the model can correct (not a protocol error), naming the field.
     let bad = client
         .call_tool(CallToolRequestParams::new("get_user"))
         .await?;
@@ -144,7 +144,7 @@ async fn tools_mode_http_roundtrip() -> anyhow::Result<()> {
         .unwrap_or_default();
     assert!(
         message.contains("id"),
-        "build error should name the missing field: {message}"
+        "validation error should name the missing field: {message}"
     );
 
     client.cancel().await?;

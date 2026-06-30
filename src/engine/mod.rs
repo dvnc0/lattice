@@ -10,10 +10,12 @@ pub mod body;
 pub mod command;
 pub mod request;
 pub mod response;
+pub mod validate;
 pub mod value;
 
 pub use body::{build_body, BodyError};
 pub use command::{build_command, CommandError, CommandSpec};
 pub use request::{build_request, HttpRequestSpec, RequestError};
 pub use response::{filter, parse_output, ResponseError};
+pub use validate::{InputSchema, SchemaError};
 pub use value::{resolve, resolve_optional, resolve_path, Ctx, ValueError, ValueExpr};

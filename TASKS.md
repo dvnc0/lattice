@@ -1,11 +1,11 @@
 # Tasks: Lattice
 
 > Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13)
-> and **T14 + T15 done** → **MVP reached**: `lattice --config X` serves config-driven
-> tools over stdio end to end — `list_tools` (verbatim schema) + `call_tool` → engine →
-> exec → filter → `CallToolResult`, production `Client` builder (no redirects, connect
-> timeout), and a subprocess test proving stdout is **only** framed JSON-RPC (logs →
-> stderr). Next: **T16 (dispatcher mode)**, then T17/T18.
+> and **T14 + T15 done** → **MVP reached** (config-driven tool callable over stdio with a
+> provably clean JSON-RPC channel). **T17 done**: call arguments are validated against the
+> tool's compiled `inputSchema` before anything runs (violations → `isError`, nothing
+> executed; ReDoS-bounded). Next: **T16 (dispatcher mode)** — which builds on T17's
+> validation for `call_route` — then T18.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -244,13 +244,23 @@
   - Verify: `cargo test --test mcp_roundtrip dispatcher`.
   - Files: `src/mcp/server.rs`, `src/mcp/dispatcher.rs`, `tests/mcp_roundtrip.rs`.
 
-- [ ] **T17 — Runtime input-schema validation**
+- [x] **T17 — Runtime input-schema validation** ✅
   - Acceptance: call params validated against the tool's compiled `inputSchema` before any request/command; violations → `isError` listing them, nothing executed. Reuses schemas compiled in T5.
   - Verify: `cargo test schema_validation`.
-  - Files: `src/engine/validate.rs`, `src/mcp/server.rs`.
-  - Also (from T5 review): `jsonschema` pulls `fancy-regex`; if a tool's `inputSchema`
-    uses `pattern` and we match it against model-supplied (attacker-influenced) input,
-    watch for ReDoS. Compile schemas once and reuse; consider bounding match effort.
+  - Files: `src/engine/validate.rs`, `src/mcp/server.rs`, `tests/mcp_roundtrip.rs`.
+  - Note: `engine::validate::InputSchema::compile` wraps a `jsonschema::Validator`,
+    compiled **once** per tool in `LatticeServer::new` and stored on `PreparedTool` as
+    `Option<InputSchema>`. `call_tool` validates the (object) arguments **before**
+    `Ctx`/dispatch; `validate` returns *all* violations (via `iter_errors`), each rendered
+    as `"<instance-path>: <message>"`, and the server returns one `isError` result listing
+    them — nothing is built or executed. `None` (no schema authored, or a schema that fails
+    to compile → warned) skips validation; the engine boundary stays injection-safe either
+    way. 6 `schema_validation` unit tests + the e2e roundtrip missing-required case.
+  - ReDoS (from T5 review) **addressed**: `fancy-regex` enforces a backtrack limit, so a
+    catastrophic `pattern` + adversarial input surfaces as a `BacktrackLimitExceeded`
+    *violation* (one more in the list), not a hang — covered by a unit test. Schema is
+    operator-authored (no `${ENV}`), compiled a single time; only the instance is
+    attacker-influenced. Violation messages echo only the caller's own arguments.
 
 - [ ] **T18 — Streamable HTTP transport**
   - Acceptance: `--http 127.0.0.1:8080` serves the same tools over Streamable HTTP (loopback default); stdio still works when the flag is absent; an rmcp HTTP client lists+calls a tool.
