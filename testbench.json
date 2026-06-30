@@ -1,0 +1,100 @@
+{
+  "server": {
+    "name": "lattice-testbench",
+    "version": "0.1.0",
+    "instructions": "A mix of public-API (JSONPlaceholder) and local-CLI tools for trying Lattice out. No credentials needed."
+  },
+  "defaults": {
+    "base_url": "https://jsonplaceholder.typicode.com",
+    "headers": { "Accept": "application/json" }
+  },
+  "tools": [
+    {
+      "name": "get_post",
+      "description": "Fetch a blog post by id from the JSONPlaceholder test API.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer", "minimum": 1, "maximum": 100 }
+        },
+        "required": ["id"]
+      },
+      "http": {
+        "method": "GET",
+        "path": "/posts/{id}",
+        "response": { "include": ["id", "title", "body"] }
+      }
+    },
+    {
+      "name": "list_comments",
+      "description": "List comments for a given post id (demonstrates a query parameter).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "postId": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["postId"]
+      },
+      "http": {
+        "method": "GET",
+        "path": "/comments",
+        "query": { "postId": "$postId" },
+        "response": { "include": ["id", "email", "name"] }
+      }
+    },
+    {
+      "name": "create_post",
+      "description": "Create a post; the test API echoes it back with a new id (demonstrates a JSON body).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "userId": { "type": "integer" }
+        },
+        "required": ["title", "body"]
+      },
+      "http": {
+        "method": "POST",
+        "path": "/posts",
+        "body": {
+          "title": "$title",
+          "body": "$body",
+          "userId": "$userId"
+        }
+      }
+    },
+    {
+      "name": "list_dir",
+      "description": "List a directory on this machine in long format (local CLI tool).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dir": { "type": "string", "description": "Directory path to list." }
+        },
+        "required": ["dir"]
+      },
+      "cli": {
+        "command": "ls",
+        "args": ["-la", "$dir"],
+        "parse": "lines"
+      }
+    },
+    {
+      "name": "word_count",
+      "description": "Count the lines, words, and characters of text piped to wc (local CLI tool).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "Text piped to wc on stdin." }
+        },
+        "required": ["text"]
+      },
+      "cli": {
+        "command": "wc",
+        "stdin": "$text",
+        "parse": "raw"
+      }
+    }
+  ]
+}

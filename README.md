@@ -287,9 +287,3 @@ All three pass `lattice check`.
 
 Design docs live alongside the code: `SPEC.md` (what and why), `PLAN.md` (components and
 build order), `TASKS.md` (status), and `docs/config-reference.md` (the full schema).
-
----
-
-## License
-
-MIT.
