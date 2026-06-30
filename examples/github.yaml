@@ -1,0 +1,62 @@
+# The GitHub REST API as MCP tools (dispatcher mode).
+#
+# Demonstrates: `expose: dispatcher` (the model sees only describe_route +
+# call_route plus an auto-generated route catalog), shared `defaults`, path
+# variables, optional query params, and response filtering.
+#
+# Uses public, unauthenticated endpoints. To raise rate limits or read private
+# repositories, uncomment the `auth` block below and set GITHUB_TOKEN in the
+# environment before running.
+#
+#   lattice check --config examples/github.yaml
+#   lattice       --config examples/github.yaml
+server:
+  name: github
+  version: "0.1.0"
+  expose: dispatcher
+  instructions: "Read-only access to public GitHub repositories and issues."
+
+defaults:
+  base_url: "https://api.github.com"
+  headers:
+    Accept: "application/vnd.github+json"
+    User-Agent: "lattice"
+  # auth:
+  #   type: bearer
+  #   token: "${GITHUB_TOKEN}"
+
+tools:
+  - name: get_repo
+    description: "Fetch metadata for a public repository."
+    inputSchema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+      required: ["owner", "repo"]
+    http:
+      method: GET
+      path: "/repos/{owner}/{repo}"
+      response:
+        include: ["full_name", "description", "stargazers_count", "html_url"]
+
+  - name: list_issues
+    description: "List open issues for a public repository."
+    inputSchema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        per_page:
+          type: integer
+          minimum: 1
+          maximum: 100
+      required: ["owner", "repo"]
+    http:
+      method: GET
+      path: "/repos/{owner}/{repo}/issues"
+      query:
+        state: "open"
+        per_page: "$per_page"
+      response:
+        exclude: ["user", "reactions"]

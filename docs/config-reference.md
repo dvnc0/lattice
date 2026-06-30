@@ -7,14 +7,14 @@ uses the same keys.
 
 ```
 lattice --config tools.yaml            # serve over stdio
-lattice --config tools.json --http 127.0.0.1:8080   # also serve over HTTP
+lattice --config tools.json --http 127.0.0.1:8080   # serve over HTTP instead of stdio
 lattice check --config tools.yaml      # validate without serving
 ```
 
-> **Implementation status.** The whole schema **parses and validates today** (T3).
-> Runtime behaviors land per task — see the [status table](#implementation-status) at
-> the end. Where a field's *behavior* isn't wired yet, its **shape is final**, so
-> configs you write now stay valid.
+> **Implementation status.** The full pipeline is implemented (T3–T18): parse/validate,
+> `${ENV}`, the engine, HTTP/CLI execution with auth, both expose modes, and the stdio
+> and Streamable HTTP transports. See the [status table](#implementation-status) at the
+> end.
 
 ---
 
@@ -362,7 +362,7 @@ The translation engine is identical in both modes; only the MCP surface differs.
 
 ## Implementation status
 
-The schema is stable now; behaviors activate per task (see `TASKS.md`):
+All capabilities are implemented (see `TASKS.md` for the per-task history):
 
 | Capability | Status |
 |------------|--------|
@@ -370,11 +370,12 @@ The schema is stable now; behaviors activate per task (see `TASKS.md`):
 | `${ENV}` interpolation | ✅ T4 |
 | `check` (env presence, JSON-Schema validity, include/exclude exclusivity, `body`+`body_from` conflict, per-variant auth keys) | ✅ T5 |
 | Value expressions (`$ref` / `${ENV}` / `{{ template }}` / `{path}`) | ✅ T6 |
-| Nested body building | T7 |
-| HTTP request build + execution | T8, T11 |
-| CLI command build + execution | T9, T13 |
-| Response filtering | T10 |
-| Auth (bearer/basic/api_key) + OAuth2 | T12 |
-| `tools` mode serving | T14–T15 |
-| `dispatcher` mode | T16 |
-| Streamable HTTP transport (`--http`) | T18 |
+| Nested body building | ✅ T7 |
+| HTTP request build + execution | ✅ T8, T11 |
+| CLI command build + execution | ✅ T9, T13 |
+| Response filtering | ✅ T10 |
+| Auth (bearer/basic/api_key) + OAuth2 | ✅ T12 |
+| Runtime `inputSchema` validation | ✅ T17 |
+| `tools` mode serving | ✅ T14–T15 |
+| `dispatcher` mode | ✅ T16 |
+| Streamable HTTP transport (`--http`) | ✅ T18 |

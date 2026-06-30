@@ -1,10 +1,10 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. **Phases B + C + D complete** (T6–T18):
-> config-driven **tools** + **dispatcher** modes over both **stdio** and **Streamable
-> HTTP** (`--http`, loopback host-validation by default), with `inputSchema` validation
-> before any execution (ReDoS-bounded) and a stdout-purity guard. Only **Phase E — T19
-> (examples/README/lint gate)** remains to ship v1.
+> Status: **Phase 4 (Implement) — COMPLETE. v1 shippable.** All tasks T1–T19 done:
+> config-driven **tools** + **dispatcher** modes over **stdio** and **Streamable HTTP**
+> (`--http`, loopback host-validation by default), `inputSchema` validation before any
+> execution (ReDoS-bounded), a stdout-purity guard, three working examples that pass
+> `lattice check`, a README + config reference, and green clippy/fmt/audit gates.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -293,10 +293,18 @@
 
 ## Phase E — Polish
 
-- [ ] **T19 — Examples, README, lint gate**
+- [x] **T19 — Examples, README, lint gate** ✅
   - Acceptance: `examples/{httpbin,github,ls}.yaml` all pass `lattice check`; README covers quickstart, config reference, expose modes, auth, value expressions; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` are green.
   - Verify: `lattice check --config examples/*.yaml`; `cargo clippy --all-targets -- -D warnings`; `cargo fmt --check`.
-  - Files: `examples/httpbin.yaml`, `examples/github.yaml`, `examples/ls.yaml`, `README.md`.
+  - Files: `examples/httpbin.yaml`, `examples/github.yaml`, `examples/ls.yaml`, `README.md`, `docs/config-reference.md`.
+  - Note: `httpbin.yaml` (tools mode — query/path-var/nested-body/template/filtering, no
+    auth), `github.yaml` (dispatcher mode over the public GitHub API, shared defaults,
+    auth shown as a commented `${GITHUB_TOKEN}` bearer), `ls.yaml` (CLI — argv args, stdin,
+    `parse` modes). All three pass `check`; `ls.yaml` was smoke-tested end-to-end over
+    stdio. README covers quickstart, the call-flow pipeline, config-at-a-glance, value
+    expressions, expose modes, auth, transports (incl. the HTTP production caveat), and the
+    security model — linking the full schema in `docs/config-reference.md` (whose stale
+    `--http` wording + status table were corrected).
 
 ## Parallelizable
 

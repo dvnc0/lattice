@@ -1,0 +1,73 @@
+# httpbin.org as MCP tools (tools mode).
+#
+# Demonstrates: shared `defaults`, HTTP GET with query params, a path variable,
+# a nested JSON body, a `{{ template }}` value expression, `$ref` input lookups,
+# and response filtering. Needs no credentials.
+#
+#   lattice check  --config examples/httpbin.yaml      # validate
+#   lattice        --config examples/httpbin.yaml      # serve over stdio
+server:
+  name: httpbin
+  version: "0.1.0"
+  instructions: "Tools backed by httpbin.org for exercising HTTP requests."
+
+defaults:
+  base_url: "https://httpbin.org"
+  headers:
+    Accept: "application/json"
+
+tools:
+  - name: get_anything
+    description: "Echo a GET request back, including the query parameter you pass."
+    inputSchema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: "A term echoed back under args.q."
+      required: ["query"]
+    http:
+      method: GET
+      path: "/anything"
+      query:
+        q: "$query"
+      response:
+        include: ["args", "method", "url"]
+
+  - name: post_user
+    description: "POST a JSON body assembled from your input and echo the parsed result."
+    inputSchema:
+      type: object
+      properties:
+        first:
+          type: string
+        last:
+          type: string
+        active:
+          type: boolean
+      required: ["first"]
+    http:
+      method: POST
+      path: "/anything"
+      body:
+        user.name.first: "$first"
+        user.name.last: "$last"
+        user.full_name: "{{ input.first }} {{ input.last }}"
+        user.active: "$active"
+        source: "lattice"
+      response:
+        include: ["json", "method"]
+
+  - name: status
+    description: "Return the given HTTP status code (path-variable demo; 4xx/5xx come back as a tool error)."
+    inputSchema:
+      type: object
+      properties:
+        code:
+          type: integer
+          minimum: 100
+          maximum: 599
+      required: ["code"]
+    http:
+      method: GET
+      path: "/status/{code}"

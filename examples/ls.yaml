@@ -1,0 +1,42 @@
+# Local CLI tools as MCP tools.
+#
+# Demonstrates the CLI backing: argv-only execution (no shell, so no injection),
+# array arguments, stdin, and `parse` modes. The program is a literal from config
+# (model input can never choose which binary runs); only the arguments come from
+# the call.
+#
+#   lattice check --config examples/ls.yaml
+#   lattice       --config examples/ls.yaml
+server:
+  name: local-tools
+  version: "0.1.0"
+  instructions: "A few read-only local commands exposed as MCP tools."
+
+tools:
+  - name: list_dir
+    description: "List the contents of a directory in long format."
+    inputSchema:
+      type: object
+      properties:
+        dir:
+          type: string
+          description: "Directory to list."
+      required: ["dir"]
+    cli:
+      command: ls
+      args: ["-la", "$dir"]
+      parse: lines
+
+  - name: word_count
+    description: "Count the lines, words, and characters of the supplied text."
+    inputSchema:
+      type: object
+      properties:
+        text:
+          type: string
+          description: "Text piped to wc on stdin."
+      required: ["text"]
+    cli:
+      command: wc
+      stdin: "$text"
+      parse: raw
