@@ -1,10 +1,11 @@
 # Tasks: Lattice
 
-> Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13):
-> pure engine (74 unit tests) + execution layer — HTTP executor, all four auth schemes
-> (oauth2 cache/refresh), and CLI executor (19 HTTP + 9 CLI integration tests). Next:
-> **Phase D — MCP surface, starting at T14** (config-driven tools over the rmcp server;
-> the deferred `Client`-builder hardening lands here). Then T15 (stdio), T16+.
+> Status: **Phase 4 (Implement)** — in progress. **Phases B + C complete** (T6–T13)
+> and **T14 done**: the rmcp server now serves config-driven tools (tools mode) end to
+> end — `list_tools` (verbatim schema) + `call_tool` → engine → exec → filter →
+> `CallToolResult`, with the production `Client` builder (no redirects, connect timeout).
+> Next: **T15 (stdio purity)**, then T16+. The **MVP** (config-driven HTTP tool callable
+> over stdio) is effectively reached pending T15's stdout-purity guard.
 > Derived from PLAN.md. Each task ≤5 files, single focused session, dependency-ordered.
 
 ## Phase A — Foundations
@@ -203,10 +204,26 @@
 
 ## Phase D — MCP surface
 
-- [ ] **T14 — Server tools-mode + result mapping (MVP)**
+- [x] **T14 — Server tools-mode + result mapping (MVP)** ✅
   - Acceptance: replace tracer's hardcoded tool — `list_tools` returns config tools with **verbatim** inputSchema; `call_tool` dispatches name→engine→exec→filter→`CallToolResult` (text content; optional structuredContent); isError propagates. In-process rmcp client calls an HTTP tool end-to-end vs wiremock.
   - Verify: `cargo test --test mcp_roundtrip tools_mode`.
   - Files: `src/mcp/server.rs`, `src/mcp/result.rs`, `src/main.rs`, `tests/mcp_roundtrip.rs`.
+  - Note: `LatticeServer::new(Config)` prepares per-tool descriptors + (HTTP) `AuthState`
+    **once** (so the OAuth token cache persists across calls) and a shared production
+    `reqwest::Client`. `call_tool` builds input → `Ctx` → `target()` dispatch:
+    `build_request`+`exec::http::execute` (with auth) / `build_command`+`exec::cli::execute`.
+    `result::outcome_to_result` maps `ToolOutcome` → text content + (object-only)
+    `structuredContent`, propagating `is_error`. **Every** model-actionable failure is an
+    `isError` *result*, never a protocol error: unknown tool, engine build error, exec
+    failure, non-2xx/non-zero. Tracer (`mcp_tracer.rs`) replaced by `mcp_roundtrip.rs`
+    (HTTP vs wiremock + real-process CLI); `main.rs serve_stdio` now requires `--config`
+    and loads it. 2 roundtrip + 7 unit tests (130 total).
+  - Carried-forward hardening **landed here**: production `Client` builder with
+    `redirect::Policy::none()` + `connect_timeout(10s)`; cleartext-`http://`-auth warning;
+    model-input build failures (`RequestError`/`CommandError`) mapped to `isError` results;
+    `ValueError::Template` messages scrubbed before surfacing/logging (could echo an
+    interpolated secret). Still deferred: operator-configurable timeouts/size caps; the
+    CLI env-passthrough/loader-hijack policy (T13 notes) — track for the config model.
 
 - [ ] **T15 — stdio wiring + stdout purity**
   - Acceptance: `lattice --config X` serves over stdio; a test asserts stdout carries **only** framed JSON-RPC (no log/print leakage).

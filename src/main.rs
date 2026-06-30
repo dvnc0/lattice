@@ -1,8 +1,8 @@
 //! `lattice` — config-driven MCP shell binary.
 //!
-//! Tracer-bullet stage: serves a hardcoded `ping` tool over stdio. Config loading
-//! (T3–T5), the translation engine (T6–T10), execution (T11–T13), and the HTTP
-//! transport (T18) arrive in later tasks.
+//! Loads a config (T3–T5), builds config-driven tools over the engine (T6–T10) and
+//! executors (T11–T13), and serves them as an MCP server over stdio (T14). The
+//! Streamable HTTP transport (T18) arrives in a later task.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -93,13 +93,19 @@ fn check(config: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
-/// Serve the MCP server over stdio.
+/// Serve the config's tools as an MCP server over stdio.
 async fn serve_stdio(config: Option<&Path>) -> anyhow::Result<()> {
-    if let Some(path) = config {
-        tracing::info!(config = %path.display(), "config provided (loading lands in task T14)");
-    }
-    tracing::info!("starting lattice MCP server over stdio (tracer bullet: 'ping' tool)");
-    let service = LatticeServer::new().serve(stdio()).await?;
+    // Serving requires a config: there are no tools without one.
+    let Some(path) = config else {
+        anyhow::bail!("serving requires --config <path>");
+    };
+    let config = lattice::config::load_config(path)?;
+    tracing::info!(
+        server = %config.server.name,
+        tools = config.tools.len(),
+        "starting lattice MCP server over stdio"
+    );
+    let service = LatticeServer::new(config).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
