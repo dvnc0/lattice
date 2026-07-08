@@ -1,0 +1,55 @@
+{
+  "server": {
+    "name": "dadjokes",
+    "version": "0.1.0",
+    "instructions": "A simple API for fetching dad jokes. No credentials needed."
+  },
+  "defaults": {
+    "base_url": "https://icanhazdadjoke.com",
+    "headers": {
+        "Accept": "application/json"
+    }
+  },
+  "tools": [
+    {
+      "name": "get_joke",
+      "description": "Fetch a random dad joke.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" }
+        },
+        "required": []
+      },
+      "http": {
+        "method": "GET",
+        "path": "/"
+      }
+    },
+    {
+        "name": "search_jokes",
+        "description": "Search for dad jokes by a search term.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "term": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 30 },
+                "current_page": { "type": "integer", "minimum": 1 },
+                "next_page": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["term"]
+        },
+        "http": {
+            "method": "GET",
+            "path": "/search",
+            "query": { "term": "$term" },
+            "body": {
+                "limit": "$limit",
+                "current_page": "$current_page",
+                "next_page": "$next_page",
+                "search_term": "$term"
+            }
+        }
+    }
+  ]
+}
