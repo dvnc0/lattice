@@ -7,3 +7,4 @@
 .env.*.local
 *.pem
 *.key
+examples/openapi/*.yaml

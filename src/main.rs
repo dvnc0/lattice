@@ -12,6 +12,7 @@ use rmcp::transport::stdio;
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
+use lattice::gen::{GenExpose, GenFormat, GenerateArgs};
 use lattice::mcp::LatticeServer;
 
 /// Turn existing REST APIs and CLI tools into MCP servers from a config file.
@@ -34,6 +35,24 @@ struct Cli {
 enum Command {
     /// Validate the config without starting the server.
     Check,
+    /// Generate a Lattice config from an OpenAPI 3.0.x spec file.
+    Generate(GenerateCliArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct GenerateCliArgs {
+    /// Path to the OpenAPI 3.0.x spec file (YAML or JSON).
+    #[arg(long)]
+    spec: PathBuf,
+    /// Write generated config to this file instead of stdout.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Output format.
+    #[arg(long, default_value = "yaml")]
+    format: GenFormat,
+    /// Override the expose mode (default: auto-select based on operation count).
+    #[arg(long)]
+    expose: Option<GenExpose>,
 }
 
 #[tokio::main]
@@ -44,6 +63,12 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Command::Check) => check(cli.config.as_deref()),
+        Some(Command::Generate(args)) => lattice::gen::run(&GenerateArgs {
+            spec: args.spec,
+            output: args.output,
+            format: args.format,
+            expose: args.expose,
+        }),
         None => match &cli.http {
             Some(addr) => serve_http(cli.config.as_deref(), addr).await,
             None => serve_stdio(cli.config.as_deref()).await,
